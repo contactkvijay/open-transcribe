@@ -1,6 +1,11 @@
-# Transcribe — Complete Step-by-Step Setup Guide
+# open-transcribe — Complete Step-by-Step Setup Guide
 
-A Chrome extension + FastAPI backend that adds **📥 MP3** and **📝 Text** buttons next to every video on x.com, twitter.com, and youtube.com (watch pages, Shorts, and feed thumbnails). Click MP3 to download the audio. Click Text to get an instant Whisper transcript. Multi-user via Google sign-in. Per-user transcript history.
+A Chrome extension + FastAPI backend offering two tools that share the same auth and infrastructure:
+
+1. **Video transcription** — `📥 MP3` / `📝 Text` buttons next to every video on x.com, twitter.com, and youtube.com (watch pages, Shorts, and feed thumbnails). Click MP3 to download the audio; click Text for an instant Whisper transcript.
+2. **X bookmarks → second-brain archive** — one-click export of `x.com/i/bookmarks` to a folder of Obsidian/Notion-ready Markdown with full article bodies, threads, top-20 comments, YAML frontmatter, and a CSV index. Auto-syncs ongoing bookmarks. Phases 1–14 cover transcription. **Phase 15** covers the bookmarks setup.
+
+Multi-user via Google sign-in. Per-user transcript history.
 
 This guide reproduces everything that was set up. Follow it from top to bottom; nothing is skipped. Wherever a value is sensitive, a placeholder like `<YOUR_GROQ_KEY>` is used.
 
@@ -9,16 +14,36 @@ This guide reproduces everything that was set up. Follow it from top to bottom; 
 ## What You'll End Up With
 
 ```
-┌──────────────────┐     ┌────────────────────┐     ┌──────────────────┐
-│  Chrome on x.com │ ──▶ │   ngrok HTTPS URL  │ ──▶ │ FastAPI on VPS   │
-│  (extension)     │     │   (free tunnel)    │     │ port 8765        │
-└──────────────────┘     └────────────────────┘     └────────┬─────────┘
-                                                             │
-                                              ┌──────────────┼──────────────┐
-                                              ▼              ▼              ▼
-                                        yt-dlp ─▶ ffmpeg   Groq Whisper   SQLite
-                                        (MP4→MP3 audio)    (audio→text)   (users + history)
+                   ┌─────────────────────────────────────┐
+                   │        Chrome on x.com / yt          │
+                   │           (the extension)            │
+                   └───────┬─────────────────┬───────────┘
+                           │                 │
+                  transcribe                bookmarks
+                  (videos)                  (own data)
+                           │                 │
+                           ▼                 ▼
+                   ┌────────────────┐   ┌─────────────────────┐
+                   │  ngrok HTTPS   │   │  Local folder via   │
+                   │     tunnel     │   │ File System Access  │
+                   └────────┬───────┘   │  API (no server     │
+                            │           │  round-trip for     │
+                            ▼           │  the .md files)     │
+                   ┌────────────────┐   └─────────────────────┘
+                   │ FastAPI : 8765 │
+                   └────────┬───────┘
+                            │
+            ┌───────────────┼───────────────┐
+            ▼               ▼               ▼
+       yt-dlp          Groq Whisper      SQLite
+       + ffmpeg        (audio→text)     (users + history)
+       (video→MP3)
+            │
+            ▼ (YouTube only)
+       deno + EJS solver  +  cookies.txt
 ```
+
+The bookmarks export does **not** round-trip the .md writes through the backend — it's all in-browser writing to a user-picked folder via the File System Access API. The backend's `/api/x/tweet` endpoint is only used as an optional fallback when X fails to render a tweet (geo-block, soft rate-limit).
 
 ---
 
@@ -485,7 +510,7 @@ Now that you have the extension ID, finish the OAuth client:
 3. The OAuth flow opens; pick your Gmail (must be in the Test Users list from Phase 5.3).
 4. Grant permission. Popup closes. The extension popup now shows your name + email + an empty "Recent" list.
 
-### 14.2 Try it on a real X or YouTube video
+### 14.2 Try transcription on a real X or YouTube video
 
 **On X / Twitter**:
 1. Go to any post on x.com that has a video.
@@ -508,7 +533,92 @@ Then for either platform:
 
 ---
 
-## Phase 15 — How the Cache Works (No User Action Needed)
+## Phase 15 — Bookmarks Archive Setup (X Bookmarks → Folder of .md)
+
+The same extension also exports your X bookmarks (`x.com/i/bookmarks`) to a folder of Obsidian/Notion-ready Markdown files. Setup is light because the .md writes happen entirely in the browser via the **File System Access API**; no backend round-trip.
+
+### 15.1 Open `/i/bookmarks` and find the toolbar
+
+Visit `https://x.com/i/bookmarks`. The extension injects a toolbar row directly below X's sticky header with:
+
+| Control | Purpose |
+|---|---|
+| `[next 50 / 100 / 200 / all ▼]` | Batch size for one export run |
+| `📥 Export` | Run deep export with the selected batch size |
+| `🔍 Check` | Folder integrity check — find orphan files / orphan CSV rows |
+| `📚 N captured` | Live count from the CSV in your archive folder |
+
+### 15.2 First-time export
+
+1. Pick a batch size from the dropdown. For your first run on 700+ bookmarks, **start with `next 50`** to verify everything works without burning a rate-limit window. You can re-run for the next 50 / 100 / etc.
+2. Click **📥 Export**.
+3. Native OS folder picker opens. Pick (or create) the folder where you want your archive to live — e.g. `C:\AI\xbookmarks\` or `~/X-archive/`. The extension persists the directory handle in IndexedDB; you only do this once per browser session.
+4. **Phase 1** (collecting URLs): tab auto-scrolls the bookmarks list. Overlay shows `Phase 1 — collecting URLs: N`. Takes ~3 min for 700 bookmarks.
+5. **Phase 1.5** (smart resume): scans your folder for already-good captures and drops those URLs from the queue.
+6. **Phase 2** (per-URL navigation): tab navigates through each remaining URL one at a time, scrolls the page to load comments, captures full content. Overlay shows ETA + per-step delays + cooldown markers.
+7. When done, an overlay summary appears with counts. A `_deep-export-summary.md` file is written into the folder.
+
+> ⚠ **Don't use the tab during Phase 2.** Don't navigate, don't refresh, don't switch tabs to other x.com tabs. You CAN switch to other apps or other browser tabs to non-x.com sites — just leave THIS tab alone. ~5–10 sec per tweet, batches up to ~80 min for 700 tweets.
+
+### 15.3 Going forward: auto-sync
+
+After the first export, the extension monitors x.com globally:
+
+- Click 🔖 to bookmark any tweet anywhere → a toast confirms `📁 Saved …` and the .md / CSV row appear in your folder seconds later.
+- Click 🔖 again to un-bookmark → toast confirms `🗑 Removed … from CSV (.md kept)`. The .md file stays as archive; the CSV row is removed.
+- Visit any previously-captured tweet's detail page → if a fuller capture is now possible, the .md is silently upgraded (with a `.before-upgrade.md` backup written first).
+
+### 15.4 Files in your archive folder
+
+```
+C:\AI\xbookmarks\
+├── 2026-04-30_authorhandle_1234567890.md       ← one per bookmark
+├── 2026-04-30_authorhandle_1234567890.before-upgrade.md   (only if upgraded)
+├── bookmarks.csv                                ← index, 15 columns
+├── bookmarks.2026-05-01-18-30-00.csv            ← rolling backups (last 5)
+├── _search.json                                 ← flat array of every capture
+├── _health.csv                                  ← per-navigation timeline
+└── _deep-export-summary.md                      ← latest run's stats
+```
+
+Each `.md` opens with YAML frontmatter so Obsidian / Notion treat fields as queryable properties:
+
+```yaml
+---
+title: "@handle — first 60 chars of tweet…"
+author: "Author Name"
+handle: "handle"
+posted: "2026-04-30T10:45:00.000Z"
+posted_date: 2026-04-30
+tweet_id: "1234567890"
+permalink: "https://x.com/handle/status/1234567890"
+type: tweet           # or "article" for long-form X Articles
+source: x.com
+bookmarked_at: "2026-05-01T18:30:00.000Z"
+has_video: false
+image_count: 2
+has_thread: true
+subpost_count: 18
+thread_count: 4       ← author's continuations in replies
+comment_count: 14     ← others' replies
+parent_count: 0
+tags: [bookmark, thread]
+---
+```
+
+### 15.5 Re-running and troubleshooting bookmarks
+
+- **Re-run after a stop**: just click **📥 Export** again. Phase 1.5 will skip everything already captured cleanly; only the truncated / missing URLs go into Phase 2. For a folder with 600/700 already complete, a re-run touches just 100 URLs.
+- **X soft-rate-limited me**: extension auto-pauses 15 min on detection. If you also got a top-level "Oops" in normal browsing, the rate-limit is at X's account level; wait 30–60 min before retrying.
+- **A few URLs failed**: summary panel shows `Retry N failed via backend` button on completion. Click → backend's `/api/x/tweet` endpoint hits X's syndication API and recovers what it can. Useful for geo-blocked or login-walled tweets.
+- **Folder out of sync**: click **🔍 Check** in the toolbar. Modal shows orphan .md files (no CSV row) and orphan CSV rows (no .md). One-click fixers re-add or remove rows accordingly.
+- **A captured .md is wrong / hand-edited and got upgraded**: look for `*.before-upgrade.md` next to it — that's the file as it was before the upgrade. Diff or restore as needed.
+
+> ⚠ **Don't run the bookmarks export at the same time as a YouTube transcribe job.** Both make outbound requests; running them in parallel can trip the same anti-bot heuristics. Sequence them.
+
+---
+
+## Phase 16 — How the Cache Works (No User Action Needed)
 
 When you click the same video's button a second time, the backend looks for an existing transcript with the same `(user_id, source_url)`:
 
@@ -607,13 +717,24 @@ When the cookies later expire (a few weeks), repeat the export — the file path
 
 Track these for later — none are required to use the tool.
 
-1. **systemd auto-start** for backend + ngrok so the VPS reboot doesn't take the system down. A `transcribe-backend.service` + `transcribe-ngrok.service` pair, both `WantedBy=multi-user.target`.
-2. **Real domain + Caddy** to replace ngrok. Then the Backend URL becomes stable, the ngrok account is no longer needed, and you can publish the extension to Chrome Web Store. Migration is just changing the **Backend URL** in extension options + adding the new redirect URI to Google.
+### Infrastructure / ops
+1. **systemd auto-start** for backend + ngrok so a VPS reboot doesn't take the system down. A `transcribe-backend.service` + `transcribe-ngrok.service` pair, both `WantedBy=multi-user.target`.
+2. **Real domain + Caddy** to replace ngrok. Then the Backend URL becomes stable, the ngrok account is no longer needed, and you can publish the extension to Chrome Web Store.
 3. **Per-user usage quota / rate limiting** — currently a single user could in theory transcribe enough video to exhaust your Groq free-tier quota.
-4. **Long-video chunking** — Groq has a ~25 MB upload limit, which fits about 50 minutes of MP3 at 64 kbps (the current default in `ytdl.py`). For videos longer than that, chunk audio with ffmpeg and concatenate transcripts.
-5. **Chrome Web Store publishing** — currently the extension is loaded "unpacked" for personal use. Publishing requires a $5 developer account, a Privacy Policy, and a different OAuth client type ("Chrome Extension").
-6. **More platforms** — x.com and youtube.com are built in. yt-dlp also supports Instagram, TikTok, Reddit, etc.; adding them is whitelisting more domains in `manifest.json` and writing a small platform adapter (button injection target + URL extractor) in `extension/content.js` modeled on the existing `xPlatform` / `ytPlatform` objects.
-7. **Audio chunked streaming** for instant feedback while transcription is in progress, instead of waiting for the full result.
+4. **Chrome Web Store publishing** — currently loaded "unpacked" for personal use. Publishing needs a $5 developer account, Privacy Policy, and a different OAuth client type.
+
+### Transcription
+5. **Long-video chunking** — Groq has a ~25 MB upload limit, fits ~50 min of MP3 at 64 kbps. For longer videos, chunk audio with ffmpeg and concatenate transcripts.
+6. **Audio chunked streaming** for instant feedback while transcription is in progress.
+7. **More platforms** — x.com, twitter.com, and youtube.com are built in. yt-dlp also supports Instagram, TikTok, Reddit, etc.; adding them is whitelisting more domains in `manifest.json` and writing a small per-platform adapter in `extension/content.js` modeled on `xPlatform` / `ytPlatform`.
+
+### Bookmarks archive
+8. **AI auto-categorize / tag bookmarks** — use Groq's chat models (Llama 3 / Mixtral on free tier) to read each captured `.md` and assign tags + a top-level category, written into the YAML frontmatter. Cheap (~$0.0001/tweet) and friction-free.
+9. **Local image download** — `pbs.twimg.com/media/...` URLs can rot if X reorganizes its CDN. Optionally download images into a `_media/` subfolder and rewrite `.md` links to relative paths.
+10. **Walk parent chain upward** — currently captures the immediately-visible parents on a status detail page; deeper ancestors (replies-of-replies-of-replies) require clicking "Show more". Auto-click + recapture would extend the conversation context.
+11. **Reply-thread expansion** — same idea for replies: virtualization gives us ~20 visible; clicking "Show more replies" + scroll could capture the full thread for high-engagement bookmarks.
+12. **Search UI in the extension popup** — read `_search.json` and offer full-text search over the user's archive without opening Obsidian.
+13. **Multi-user bookmark folders** — currently the IndexedDB folder handle is single-tenant per browser profile. Multi-user vault sharing would need per-user storage paths.
 
 ---
 
@@ -632,10 +753,13 @@ Track these for later — none are required to use the tool.
 | `backend/routers/auth.py` | `POST /api/auth/google`, `GET /api/me`, `POST /api/logout` |
 | `backend/routers/transcribe.py` | `POST /api/transcribe` (with cache), `GET /api/audio/{token}` |
 | `backend/routers/history.py` | `GET /api/history`, `GET /api/history/{id}`, `DELETE /api/history/{id}` |
+| `backend/routers/x_tweet.py` | `GET /api/x/tweet?url=...` — syndication-API fallback for failed bookmarks; computes X's per-tweet token via a `node` subprocess to stay byte-identical with X's embed widget |
 | `extension/manifest.json` | MV3 manifest, host_permissions for x.com, youtube.com + ngrok wildcards |
-| `extension/background.js` | Service worker: Google OAuth via `chrome.identity.launchWebAuthFlow`, API calls (with `ngrok-skip-browser-warning` header) |
+| `extension/background.js` | Service worker: Google OAuth via `chrome.identity.launchWebAuthFlow`, API calls (with `ngrok-skip-browser-warning` header), `fetchTweetViaBackend` handler |
 | `extension/content.js` | Per-platform scanners: x.com `<video>` overlay, YouTube watch / Shorts / thumbnails. Injects buttons + shows modal. |
 | `extension/content.css` | Button + modal styling |
+| `extension/bookmarks.js` | `/i/bookmarks` toolbar + auto-sync + deep export pipeline (URL collection → smart-resume filter → per-tweet navigate-and-capture → retry queue → 429 auto-pause). Writes to a user-picked folder via the File System Access API. ~2000 LOC. |
+| `extension/bookmarks.css` | Bookmarks toolbar, deep-export overlay, integrity-check modal, toast |
 | `extension/popup.html/js/css` | Sign-in popup, recent transcripts list |
 | `extension/options.html/js` | Settings page (Backend URL, Google Client ID) |
 
