@@ -6,7 +6,7 @@ Built as a personal-utility weekend project. Open-sourced under MIT — fork it,
 
 ## Demo
 
-https://github.com/contactkvijay/open-transcribe/raw/main/Demo.mp4
+<video src="https://github.com/contactkvijay/open-transcribe/raw/main/Demo.mp4" controls muted loop playsinline width="800"></video>
 
 <sub>(If your viewer doesn't render the video inline, [open it directly](./Demo.mp4).)</sub>
 
