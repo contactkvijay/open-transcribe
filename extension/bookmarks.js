@@ -1112,14 +1112,64 @@
     }
   }
 
+  // ---------- Auto-upgrade on view ----------
+
+  // When the user opens any status detail page for a tweet that already
+  // has a .md in their folder, transparently re-extract (now with the
+  // article-body walker active) and overwrite the file IF the new capture
+  // is meaningfully better. Restricted to tweets that already exist on
+  // disk so casual browsing doesn't capture every random tweet they read.
+  let autoUpgradeRanForUrl = null;
+  async function tryAutoUpgradeOnView() {
+    if (!isStatusDetailPage()) return;
+    if (autoUpgradeRanForUrl === location.href) return;
+    autoUpgradeRanForUrl = location.href;
+
+    // Skip if a deep export is mid-flight; that loop is already doing this work.
+    const deep = await getDeepState();
+    if (deep && deep.status === "running") return;
+
+    const article = await waitForArticleStable(10000);
+    if (!article) return;
+
+    const tweet = extractTweetWithThread(article);
+    if (!tweet) return;
+
+    const handle = await getSyncHandle();
+    if (!handle) return;
+
+    // Only act on tweets we've previously captured (file exists in folder).
+    const filename = bookmarkFilename(tweet);
+    const existing = await readFileText(handle, filename);
+    if (existing == null) return;
+
+    const status = await writeBookmarkFile(handle, tweet);
+    if (status !== "upgraded") return;
+
+    // CSV gets the refreshed text_preview only if the tweet is currently
+    // bookmarked (otherwise the file is just an archive of a former
+    // bookmark and shouldn't appear in the CSV).
+    const isBookmarked = !!article.querySelector('[data-testid="removeBookmark"]');
+    if (isBookmarked) await appendCsvRow(handle, tweet);
+
+    showToast(`📁 Auto-upgraded @${tweet.author.handle}/${tweet.id.slice(-6)}`);
+  }
+
   // ---------- Boot ----------
 
   // The header isn't always present at document_idle; SPA navigation also
   // doesn't reload the script, so we observe DOM changes and (re)inject
-  // whenever the user is on the bookmarks page.
-  const observer = new MutationObserver(() => injectExportButton());
+  // whenever the user is on the bookmarks page. Same observer also retries
+  // the auto-upgrade-on-view if the URL changes via SPA navigation.
+  const observer = new MutationObserver(() => {
+    injectExportButton();
+    if (location.href !== autoUpgradeRanForUrl) {
+      tryAutoUpgradeOnView().catch((e) => console.error("[Auto-upgrade] failed", e));
+    }
+  });
   observer.observe(document.body, { childList: true, subtree: true });
   injectExportButton();
+  tryAutoUpgradeOnView().catch((e) => console.error("[Auto-upgrade] failed", e));
 
   // If a deep export is in progress (or just finished) the script needs
   // to either resume the queue or show the summary panel.
