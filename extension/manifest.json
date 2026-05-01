@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Transcribe (video → text/MP3)",
-  "version": "0.2.0",
-  "description": "Adds buttons to videos on x.com and youtube.com to grab the audio (MP3) or transcript.",
+  "version": "0.3.0",
+  "description": "Adds buttons to videos on x.com and youtube.com to grab the audio (MP3) or transcript. Also exports your X bookmarks to a folder of .md files.",
   "permissions": ["identity", "storage", "downloads", "activeTab"],
   "host_permissions": [
     "https://x.com/*",
@@ -26,6 +26,15 @@
       ],
       "js": ["content.js"],
       "css": ["content.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": ["bookmarks.js"],
+      "css": ["bookmarks.css"],
       "run_at": "document_idle"
     }
   ],
