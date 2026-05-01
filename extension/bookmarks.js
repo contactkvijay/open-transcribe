@@ -10,13 +10,6 @@
     return;
   }
 
-  const STATE = {
-    dirHandle: null,
-    captured: new Map(), // tweetId -> tweet
-    cancelled: false,
-    inProgress: false,
-  };
-
   // ---------- IndexedDB: persist directory handle ----------
 
   const DB_NAME = "tx-bookmarks";
@@ -332,9 +325,21 @@
     return "[" + arr.map(yamlString).join(", ") + "]";
   }
 
-  function tweetFrontmatter(tweet) {
+  // Pull a quoted YAML scalar from a frontmatter block. Used to preserve
+  // bookmarked_at across .md re-writes so the timestamp isn't clobbered.
+  function extractFrontmatterField(text, field) {
+    if (!text || !text.startsWith("---\n")) return null;
+    const end = text.indexOf("\n---", 4);
+    if (end === -1) return null;
+    const fm = text.slice(4, end);
+    const re = new RegExp(`^${field}:\\s*"([^"]*)"`, "m");
+    const m = fm.match(re);
+    return m ? m[1] : null;
+  }
+
+  function tweetFrontmatter(tweet, opts = {}) {
     const postedDate = (tweet.timestamp || "").slice(0, 10);
-    const exportedAt = new Date().toISOString();
+    const exportedAt = opts.bookmarkedAt || new Date().toISOString();
     const lines = ["---"];
     lines.push(`title: ${yamlString(`@${tweet.author.handle} — ${(tweet.text || "").slice(0, 60).replace(/\s+/g, " ").trim()}`)}`);
     lines.push(`author: ${yamlString(tweet.author.name)}`);
@@ -377,7 +382,7 @@
     const exportedAt = formatLocalDate(new Date().toISOString());
     const kind = tweet.isArticle ? "Article" : "Tweet";
     const lines = [];
-    lines.push(tweetFrontmatter(tweet));
+    lines.push(tweetFrontmatter(tweet, { bookmarkedAt: opts.bookmarkedAt }));
     lines.push("");
     lines.push(`# ${kind} by ${tweet.author.name} (@${tweet.author.handle})`);
     lines.push("");
@@ -583,22 +588,45 @@
     return searchQueue;
   }
 
-  // Returns a status: "created" if newly written, "upgraded" if overwritten
-  // with a meaningfully better capture, "skipped" if existing content is
-  // already at least as good. The upgrade path lets a re-bookmark from the
-  // article-detail page replace a previously-truncated bulk-export file.
+  // Returns "created" if newly written, "upgraded" if overwritten with a
+  // meaningfully better capture, "skipped" if existing content is already
+  // at least as good.
+  //
+  // Two important preservation-of-user-data behaviors:
+  // 1. bookmarked_at is read from the existing file's YAML frontmatter
+  //    and reused, so re-writes never clobber the original timestamp.
+  // 2. Before overwriting an existing file, we save it to
+  //    {basename}.before-upgrade.md so any user hand-edits are
+  //    recoverable. Mirrors the rotateCsvBackup pattern.
   async function writeBookmarkFile(dirHandle, tweet) {
     const filename = bookmarkFilename(tweet);
     const capturedIds = await getCapturedIds(dirHandle);
-    const newContent = tweetToMarkdown(tweet, { capturedIds });
     const existing = await readFileText(dirHandle, filename);
+    const priorBookmarkedAt = existing ? extractFrontmatterField(existing, "bookmarked_at") : null;
+    const newContent = tweetToMarkdown(tweet, {
+      capturedIds,
+      bookmarkedAt: priorBookmarkedAt,
+    });
     if (existing != null) {
       const newIsArticle = tweet.isArticle === true;
-      const existingIsArticle = /\*\*Type\*\*: long-form Article/.test(existing) || /^type:\s*article/m.test(existing);
+      const existingIsArticle =
+        /\*\*Type\*\*: long-form Article/.test(existing) ||
+        /^type:\s*article/m.test(existing);
       const isUpgrade =
         (newIsArticle && !existingIsArticle) ||
         newContent.length > existing.length + 200;
       if (!isUpgrade) return "skipped";
+
+      // Preserve hand-edits: stash the prior file before destroying it.
+      try {
+        const backupName = filename.replace(/\.md$/, ".before-upgrade.md");
+        const bfh = await dirHandle.getFileHandle(backupName, { create: true });
+        const bw = await bfh.createWritable();
+        await bw.write(existing);
+        await bw.close();
+      } catch (e) {
+        console.warn("[Bookmarks] backup-before-upgrade failed for", filename, e);
+      }
     }
     const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
     const writable = await fileHandle.createWritable();
@@ -607,15 +635,6 @@
     capturedIds.add(tweet.id);
     upsertSearchEntry(dirHandle, tweet).catch(() => {});
     return existing == null ? "created" : "upgraded";
-  }
-
-  async function writeCsvIndex(dirHandle, tweets) {
-    const exportedAt = new Date().toISOString();
-    const rows = [CSV_HEADER, ...tweets.map((t) => tweetToCsvRow(t, exportedAt))];
-    const fileHandle = await dirHandle.getFileHandle("bookmarks.csv", { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(rows.join("\n") + "\n");
-    await writable.close();
   }
 
   // Snapshot bookmarks.csv to bookmarks.YYYY-MM-DD-HHMMSS.csv before any
@@ -657,7 +676,7 @@
         existing = await (await (await dirHandle.getFileHandle("_health.csv")).getFile()).text();
       } catch {}
       const lines = existing ? existing.replace(/\n+$/, "").split("\n").filter(Boolean) : [];
-      if (lines[0] !== HEALTH_HEADER) lines.unshift(HEALTH_HEADER);
+      ensureHeader(lines, HEALTH_HEADER);
       lines.push(row);
       const fh = await dirHandle.getFileHandle("_health.csv", { create: true });
       const w = await fh.createWritable();
@@ -721,102 +740,9 @@
     }
   }
 
-  // ---------- Capture loop ----------
-
+  // Shared sleep helper used by deep export.
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
-  }
-
-  function captureTimelineSweep() {
-    document.querySelectorAll('article[data-testid="tweet"]').forEach((article) => {
-      const tweet = extractTweet(article);
-      if (tweet && !STATE.captured.has(tweet.id)) {
-        STATE.captured.set(tweet.id, tweet);
-      }
-    });
-  }
-
-  async function flushNewToDisk() {
-    let written = 0;
-    for (const tweet of STATE.captured.values()) {
-      if (tweet._written) continue;
-      try {
-        await writeBookmarkFile(STATE.dirHandle, tweet);
-        tweet._written = true;
-        written++;
-      } catch (e) {
-        console.error("[Bookmarks] write failed", tweet.id, e);
-      }
-    }
-    return written;
-  }
-
-  async function exportLoop() {
-    let lastCount = 0;
-    let stableTicks = 0;
-    let backoffMs = 0;
-    while (!STATE.cancelled && stableTicks < 5) {
-      captureTimelineSweep();
-      await flushNewToDisk();
-      updateProgress(STATE.captured.size);
-
-      if (STATE.captured.size === lastCount) {
-        stableTicks++;
-        // X may have soft-rate-limited us; back off progressively.
-        backoffMs = Math.min(4000, backoffMs + 800);
-      } else {
-        stableTicks = 0;
-        backoffMs = 0;
-        lastCount = STATE.captured.size;
-      }
-
-      window.scrollBy(0, window.innerHeight * 0.85);
-      await sleep(700 + Math.random() * 300 + backoffMs);
-    }
-    captureTimelineSweep();
-    await flushNewToDisk();
-    await writeCsvIndex(STATE.dirHandle, [...STATE.captured.values()]);
-    return STATE.captured.size;
-  }
-
-  // ---------- Progress overlay UI ----------
-
-  let panel = null;
-
-  function showOverlay() {
-    if (panel) panel.remove();
-    panel = document.createElement("div");
-    panel.id = "tx-bm-overlay";
-    panel.innerHTML = `
-      <div class="tx-bm-title">📁 Exporting bookmarks…</div>
-      <div class="tx-bm-counter">Captured 0</div>
-      <div class="tx-bm-actions">
-        <button class="tx-bm-cancel">Cancel</button>
-      </div>
-    `;
-    document.body.appendChild(panel);
-    panel.querySelector(".tx-bm-cancel").addEventListener("click", () => {
-      STATE.cancelled = true;
-    });
-  }
-
-  function updateProgress(n) {
-    if (!panel) return;
-    panel.querySelector(".tx-bm-counter").textContent = `Captured ${n}`;
-  }
-
-  function finishOverlay(total, cancelled) {
-    if (!panel) return;
-    panel.querySelector(".tx-bm-title").textContent = cancelled
-      ? "⛔ Export cancelled"
-      : "✅ Export complete";
-    panel.querySelector(".tx-bm-counter").textContent = `${total} bookmark${total === 1 ? "" : "s"} written`;
-    const actions = panel.querySelector(".tx-bm-actions");
-    actions.innerHTML = '<button class="tx-bm-close">Close</button>';
-    actions.querySelector(".tx-bm-close").addEventListener("click", () => {
-      panel.remove();
-      panel = null;
-    });
   }
 
   // ---------- Trigger button ----------
@@ -850,16 +776,9 @@
     toolbar.id = "tx-bm-toolbar";
     toolbar.className = "tx-bm-toolbar";
 
-    // Quick export
-    const quick = document.createElement("button");
-    quick.id = "tx-bm-trigger";
-    quick.className = "tx-bm-trigger";
-    quick.textContent = "📁 Quick";
-    quick.title = "Fast scroll-and-capture from the bookmarks list. Articles come out truncated; use Deep export for full content.";
-    quick.addEventListener("click", startExport);
-    toolbar.appendChild(quick);
-
-    // Deep export with batch dropdown (joined as one pill)
+    // Export with batch dropdown (joined as one pill). The previous "Quick"
+    // button was removed -- it captured only timeline-list previews and was
+    // confusing alongside the full-content "Deep" path.
     const deepWrap = document.createElement("span");
     deepWrap.id = "tx-bm-deep-wrapper";
     deepWrap.className = "tx-bm-deep-wrapper";
@@ -884,8 +803,8 @@
     const deep = document.createElement("button");
     deep.id = "tx-bm-deep-trigger";
     deep.className = "tx-bm-trigger tx-bm-trigger--deep";
-    deep.textContent = "🌊 Deep";
-    deep.title = "Slow but complete: opens every bookmarked tweet's detail page and captures the full article + thread + top 20 sub-posts.";
+    deep.textContent = "📥 Export";
+    deep.title = "Opens every bookmarked tweet's detail page and captures the full article body + thread + top 20 comments. Use the dropdown to pick a batch size.";
     deep.addEventListener("click", () => {
       const limit = parseInt(select.value, 10) || 0;
       startDeepExport({ batchLimit: limit });
@@ -1156,47 +1075,6 @@
     }
   }
 
-  async function startExport() {
-    if (STATE.inProgress) return;
-    STATE.inProgress = true;
-
-    let dirHandle = await loadHandle();
-    if (dirHandle) {
-      const ok = await ensurePermission(dirHandle);
-      if (!ok) dirHandle = null;
-    }
-    if (!dirHandle) {
-      try {
-        dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
-        await saveHandle(dirHandle);
-      } catch {
-        STATE.inProgress = false;
-        return;
-      }
-    }
-
-    STATE.dirHandle = dirHandle;
-    STATE.captured.clear();
-    STATE.cancelled = false;
-
-    // Snapshot existing CSV before this run rewrites it.
-    await rotateCsvBackup(dirHandle);
-
-    showOverlay();
-    try {
-      const total = await exportLoop();
-      finishOverlay(total, STATE.cancelled);
-    } catch (e) {
-      console.error("[Bookmarks] export error", e);
-      if (panel) {
-        panel.querySelector(".tx-bm-title").textContent = "⚠ Export error";
-        panel.querySelector(".tx-bm-counter").textContent = e.message || String(e);
-      }
-    } finally {
-      STATE.inProgress = false;
-    }
-  }
-
   // ---------- Auto-sync: live bookmark/unbookmark -> folder + CSV ----------
 
   // Serialize CSV ops so concurrent clicks don't read-modify-write race.
@@ -1228,19 +1106,73 @@
     return raw.replace(/^"|"$/g, "").replace(/""/g, '"');
   }
 
+  // Proper RFC4180-ish CSV line parser: handles quoted cells with embedded
+  // commas, embedded newlines (single line input only), and "" escapes.
+  function csvParseLine(line) {
+    const out = [];
+    let cur = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (line[i + 1] === '"') { cur += '"'; i++; }
+          else { inQuotes = false; }
+        } else {
+          cur += c;
+        }
+      } else {
+        if (c === ",") { out.push(cur); cur = ""; }
+        else if (c === '"' && cur === "") { inQuotes = true; }
+        else { cur += c; }
+      }
+    }
+    out.push(cur);
+    return out;
+  }
+  function csvNthColumn(line, n) {
+    const cells = csvParseLine(line);
+    return cells[n] != null ? cells[n] : "";
+  }
+  // First-column heuristic: a header line begins with the literal token
+  // "tweet_id"; data rows begin with a numeric tweet id.
+  function looksLikeHeaderLine(line) {
+    const first = csvFirstColumn(line);
+    return first === "tweet_id" || /^[a-zA-Z_]/.test(first);
+  }
+  function ensureHeader(lines, header) {
+    if (lines.length === 0) {
+      lines.push(header);
+    } else if (lines[0] !== header) {
+      // Replace stale header in place; otherwise prepend the missing one.
+      if (looksLikeHeaderLine(lines[0])) lines[0] = header;
+      else lines.unshift(header);
+    }
+  }
+
   // Upsert: if a row for this tweet_id already exists, replace it (so an
-  // upgraded capture — e.g. truncated preview -> full article body —
-  // refreshes the CSV's text_preview alongside the .md file).
+  // upgraded capture refreshes the CSV's text_preview alongside the .md
+  // file). Preserves the original bookmarked_at timestamp from the prior
+  // row -- only fresh rows get the current time. Header repair replaces
+  // a stale header in place rather than prepending (which would leave
+  // the old header as a phantom data row at index 1).
   async function appendCsvRow(dirHandle, tweet) {
     await csvLock(async () => {
       const current = await readCsvText(dirHandle);
       const lines = current.replace(/\n+$/, "").split("\n").filter(Boolean);
-      if (lines[0] !== CSV_HEADER) lines.unshift(CSV_HEADER);
+      ensureHeader(lines, CSV_HEADER);
       const kept = [lines[0]];
+      let priorBookmarkedAt = null;
       for (let i = 1; i < lines.length; i++) {
-        if (csvFirstColumn(lines[i]) !== tweet.id) kept.push(lines[i]);
+        if (csvFirstColumn(lines[i]) === tweet.id) {
+          // bookmarked_at is the 5th column (index 4)
+          priorBookmarkedAt = csvNthColumn(lines[i], 4) || null;
+        } else {
+          kept.push(lines[i]);
+        }
       }
-      kept.push(tweetToCsvRow(tweet, new Date().toISOString()));
+      const bookmarkedAt = priorBookmarkedAt || new Date().toISOString();
+      kept.push(tweetToCsvRow(tweet, bookmarkedAt));
       await writeCsvText(dirHandle, kept.join("\n") + "\n");
     });
   }
@@ -1387,21 +1319,30 @@
   async function clearDeepState() {
     await chrome.storage.local.remove(DEEP_KEY);
   }
-  // Atomic read-modify-write that protects user intent: once status is
-  // "cancelled" or "done", a stale write from the loop CAN'T revive it
-  // back to "running". This kills the cancel-vs-loop race that was
-  // causing the queue to keep navigating after the user clicked Cancel.
+  // Serialize all read-modify-write operations on the deep-export state
+  // through a single Promise chain so concurrent ticks (loop + Cancel
+  // click + summary write) can't interleave their reads-and-writes. The
+  // status guard inside still acts as an explicit safeguard, but with
+  // the queue in place a stale "running" snapshot from one path can no
+  // longer overwrite a "cancelled" set by another path.
+  let deepQueue = Promise.resolve();
   async function patchDeepState(updates) {
-    const current = await getDeepState();
-    if (!current) return null;
-    if ((current.status === "cancelled" || current.status === "done") &&
-        updates.status === undefined) {
-      // Loop trying to write progress, but user already terminated. Don't.
-      return current;
-    }
-    const merged = { ...current, ...updates };
-    await setDeepState(merged);
-    return merged;
+    const next = deepQueue.then(async () => {
+      const current = await getDeepState();
+      if (!current) return null;
+      if (
+        (current.status === "cancelled" || current.status === "done") &&
+        updates.status === undefined
+      ) {
+        // Loop trying to write progress, but user already terminated. Don't.
+        return current;
+      }
+      const merged = { ...current, ...updates };
+      await setDeepState(merged);
+      return merged;
+    });
+    deepQueue = next.catch(() => {}); // keep queue alive on errors
+    return next;
   }
 
   function permalinkFromArticle(article) {
@@ -1584,8 +1525,14 @@
         const fresh = await getDeepState();
         if (!fresh || fresh.status !== "running") return;
       }
-      // Resume: navigate to current URL fresh
-      location.href = state.queue[state.cursor];
+      // Resume: navigate to current URL using the right queue for our phase.
+      const resumeQueue = state.phase === "retrying" ? state.retryQueue : state.queue;
+      const resumeUrl = (resumeQueue || [])[state.cursor];
+      if (!resumeUrl) {
+        await deepFinish(state, "done");
+        return;
+      }
+      location.href = resumeUrl;
       return;
     }
 
@@ -1706,7 +1653,13 @@
       await sleep(RATE_LIMIT_PAUSE_MS);
       const fresh = await getDeepState();
       if (!fresh || fresh.status !== "running") return;
-      location.href = after.queue[after.cursor];
+      const resumeQueue = fresh.phase === "retrying" ? fresh.retryQueue : fresh.queue;
+      const resumeUrl = (resumeQueue || [])[fresh.cursor];
+      if (!resumeUrl) {
+        await deepFinish(fresh, "done");
+        return;
+      }
+      location.href = resumeUrl;
       return;
     }
 

@@ -184,14 +184,22 @@ const ytPlatform = {
     });
   },
   injectThumbBar(anchor) {
-    const m = (anchor.getAttribute("href") || "").match(/[?&]v=([^&]+)/);
-    if (!m) return;
-    const cleanUrl = `https://www.youtube.com/watch?v=${m[1]}`;
+    // Sanity: anchor must currently link to a watch URL. If not, skip
+    // (we'll re-evaluate next mutation tick).
+    const initialMatch = (anchor.getAttribute("href") || "").match(/[?&]v=([^&]+)/);
+    if (!initialMatch) return;
     const cs = getComputedStyle(anchor);
     if (cs.position === "static") anchor.style.position = "relative";
     const bar = createBar({
       barClass: "xtx-bar xtx-bar--thumb",
-      getUrl: () => cleanUrl,
+      // Read the href LAZILY at click time. YouTube recycles a#thumbnail
+      // elements across virtualized feeds and updates href in place; if we
+      // captured the URL eagerly we'd transcribe the previously-shown
+      // video when the user clicks the chip on a later card.
+      getUrl: () => {
+        const m = (anchor.getAttribute("href") || "").match(/[?&]v=([^&]+)/);
+        return m ? `https://www.youtube.com/watch?v=${m[1]}` : null;
+      },
     });
     anchor.appendChild(bar);
   },

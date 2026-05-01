@@ -7,8 +7,9 @@ public tweets and computes a deterministic per-tweet token the same
 way X's official embed widget does.
 """
 import logging
-import math
 import re
+import shutil
+import subprocess
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,45 +21,55 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/x", tags=["x"])
 
 
-_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
-
-
-def _to_base36(value: float) -> str:
-    """Match JS Number.prototype.toString(36) for non-negative floats."""
-    if value == 0:
-        return "0"
-    int_part = int(value)
-    frac_part = value - int_part
-
-    int_str = ""
-    if int_part == 0:
-        int_str = "0"
-    else:
-        n = int_part
-        while n > 0:
-            int_str = _DIGITS[n % 36] + int_str
-            n //= 36
-
-    if frac_part == 0:
-        return int_str
-
-    frac_str = "."
-    for _ in range(20):
-        if frac_part == 0:
-            break
-        frac_part *= 36
-        d = int(frac_part)
-        frac_str += _DIGITS[d]
-        frac_part -= d
-
-    return int_str + frac_str
-
-
 def _syndication_token(tweet_id: int) -> str:
-    """JS reference: ((id / 1e15) * Math.PI).toString(36).replace(/(0+|\\.)/g, "")"""
-    val = (tweet_id / 1e15) * math.pi
-    s = _to_base36(val)
-    return re.sub(r"(0+|\.)", "", s)
+    """Token format X's embed widget uses to sign syndication requests:
+
+        token = ((id / 1e15) * Math.PI).toString(36).replace(/(0+|\\.)/g, "")
+
+    JS Number.prototype.toString(36) emits the *shortest* base-36 string
+    that round-trips back to the same float64 (per ECMA-262 / Steele-White
+    / Grisu shortest-output). A naive Python port that emits a fixed
+    20-digit fractional expansion produces ~10 extra trailing characters
+    AND can disagree with JS on the last shared digit (rounding-up).
+    The syndication endpoint rejects the resulting token => HTTP 404.
+
+    To stay byte-identical with the JS reference, we shell out to node
+    when it's available. node is already a dependency for the YouTube
+    flow (yt-dlp's JS runtime), so the runtime cost is just startup.
+    """
+    node_path = shutil.which("node") or shutil.which("deno")
+    if not node_path:
+        raise HTTPException(
+            status_code=500,
+            detail="node (or deno) not found on PATH; required to compute syndication token",
+        )
+    if "node" in node_path:
+        js = (
+            f"process.stdout.write("
+            f"((Number({tweet_id}n)/1e15)*Math.PI).toString(36).replace(/(0+|\\.)/g, '')"
+            f")"
+        )
+        cmd = [node_path, "-e", js]
+    else:  # deno
+        js = (
+            f"Deno.stdout.writeSync(new TextEncoder().encode("
+            f"((Number({tweet_id}n)/1e15)*Math.PI).toString(36).replace(/(0+|\\.)/g, '')"
+            f"))"
+        )
+        cmd = [node_path, "eval", js]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    except (subprocess.SubprocessError, OSError) as e:
+        raise HTTPException(status_code=500, detail=f"token compute failed: {e}")
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"token compute exited {result.returncode}: {result.stderr.strip()}",
+        )
+    token = result.stdout.strip()
+    if not token:
+        raise HTTPException(status_code=500, detail="token compute returned empty")
+    return token
 
 
 @router.get("/tweet")
