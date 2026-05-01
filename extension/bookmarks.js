@@ -564,18 +564,31 @@
     if (location.pathname !== "/i/bookmarks") {
       const existing = document.getElementById("tx-bm-trigger");
       if (existing) existing.remove();
+      const existingDeep = document.getElementById("tx-bm-deep-trigger");
+      if (existingDeep) existingDeep.remove();
       return;
     }
-    if (document.getElementById("tx-bm-trigger")) return;
     const target = findHeader();
     if (!target) return;
-    const btn = document.createElement("button");
-    btn.id = "tx-bm-trigger";
-    btn.className = "tx-bm-trigger";
-    btn.textContent = "📁 Export bookmarks";
-    btn.title = "Export every bookmark in this list to a folder of .md files + bookmarks.csv";
-    btn.addEventListener("click", startExport);
-    target.appendChild(btn);
+
+    if (!document.getElementById("tx-bm-trigger")) {
+      const btn = document.createElement("button");
+      btn.id = "tx-bm-trigger";
+      btn.className = "tx-bm-trigger";
+      btn.textContent = "📁 Quick export";
+      btn.title = "Fast: scrolls the bookmarks list and saves each tweet's preview to a .md file. Articles come out truncated.";
+      btn.addEventListener("click", startExport);
+      target.appendChild(btn);
+    }
+    if (!document.getElementById("tx-bm-deep-trigger")) {
+      const btn = document.createElement("button");
+      btn.id = "tx-bm-deep-trigger";
+      btn.className = "tx-bm-trigger tx-bm-trigger--deep";
+      btn.textContent = "🌊 Deep export";
+      btn.title = "Slow but complete: opens every bookmarked tweet's detail page in turn and captures the full article body, thread, and sub-posts.";
+      btn.addEventListener("click", startDeepExport);
+      target.appendChild(btn);
+    }
   }
 
   async function startExport() {
@@ -776,6 +789,283 @@
     true // capture phase, runs before X's own handlers reach the button
   );
 
+  // ---------- Deep export: navigate every bookmark URL, capture full content ----------
+
+  // The deep export drives the tab through every bookmark URL one by one
+  // so each tweet's status detail page is rendered (= full article body +
+  // thread/sub-posts available in DOM). State lives in chrome.storage.local
+  // so the queue survives page reloads. Folder handle stays in IndexedDB
+  // (same origin, accessible from every x.com page).
+
+  const DEEP_KEY = "tx-bookmarks-deep-export";
+  const DEEP_DELAY_MIN = 1500; // polite delay between URL navigations
+  const DEEP_DELAY_MAX = 2500;
+
+  async function getDeepState() {
+    const r = await chrome.storage.local.get(DEEP_KEY);
+    return r[DEEP_KEY] || null;
+  }
+  async function setDeepState(s) {
+    await chrome.storage.local.set({ [DEEP_KEY]: s });
+  }
+  async function clearDeepState() {
+    await chrome.storage.local.remove(DEEP_KEY);
+  }
+
+  function permalinkFromArticle(article) {
+    const t = article.querySelector("time");
+    const a = t && t.closest("a");
+    const href = a && a.getAttribute("href");
+    const m = href && href.match(/^\/([^/]+)\/status\/(\d+)/);
+    return m ? `https://x.com${href.split("?")[0]}` : null;
+  }
+
+  async function waitForArticleStable(timeoutMs = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const arts = document.querySelectorAll("article");
+      for (const a of arts) {
+        if (a.querySelector("time") && a.querySelector('[data-testid="tweetText"], h1, h2')) {
+          // Give X another beat to finish hydrating sub-posts/replies
+          await sleep(800);
+          return a;
+        }
+      }
+      await sleep(200);
+    }
+    return null;
+  }
+
+  // Phase A: auto-scroll the bookmarks list, collect every permalink.
+  async function deepCollectURLs(state) {
+    const seen = new Set(state.queue);
+    let lastCount = seen.size;
+    let stableTicks = 0;
+    while (stableTicks < 5) {
+      // Cancel check
+      const fresh = await getDeepState();
+      if (!fresh || fresh.status !== "running") return;
+
+      document.querySelectorAll('article[data-testid="tweet"]').forEach((art) => {
+        const url = permalinkFromArticle(art);
+        if (url && !seen.has(url)) {
+          seen.add(url);
+          state.queue.push(url);
+        }
+      });
+
+      updateDeepPanel(state, `Phase 1 — collecting URLs: ${seen.size}`);
+
+      if (seen.size === lastCount) stableTicks++;
+      else { stableTicks = 0; lastCount = seen.size; }
+
+      window.scrollBy(0, window.innerHeight * 0.85);
+      await sleep(700 + Math.random() * 300);
+      await setDeepState(state); // persist progress
+    }
+
+    // Transition to Phase B
+    state.phase = "processing";
+    state.cursor = 0;
+    state.totalAtStart = state.queue.length;
+    await setDeepState(state);
+    updateDeepPanel(state);
+
+    if (state.queue.length === 0) {
+      await deepFinish(state, "done");
+      return;
+    }
+    // Polite gap before kicking off processing
+    await sleep(1000);
+    location.href = state.queue[0];
+  }
+
+  // Phase B (per page): on a status detail page, extract everything and
+  // navigate to the next URL.
+  async function deepProcessCurrent(state) {
+    updateDeepPanel(state);
+    const expected = state.queue[state.cursor];
+    const article = await waitForArticleStable(12000);
+
+    if (article) {
+      try {
+        const tweet = extractTweetWithThread(article);
+        if (tweet) {
+          const handle = await getSyncHandle();
+          if (handle) {
+            await writeBookmarkFile(handle, tweet);
+            await appendCsvRow(handle, tweet);
+            state.completed = (state.completed || 0) + 1;
+          } else {
+            state.failed.push({ url: expected, reason: "no folder handle" });
+          }
+        } else {
+          state.failed.push({ url: expected, reason: "extractTweet returned null" });
+        }
+      } catch (e) {
+        console.error("[Deep export] extraction failed", expected, e);
+        state.failed.push({ url: expected, reason: e.message || String(e) });
+      }
+    } else {
+      state.failed.push({ url: expected, reason: "article never appeared (deleted, rate-limited, or blocked)" });
+    }
+
+    state.cursor++;
+    await setDeepState(state);
+
+    // Cancel check
+    const fresh = await getDeepState();
+    if (!fresh || fresh.status !== "running") return;
+
+    if (state.cursor >= state.queue.length) {
+      await deepFinish(state, "done");
+      return;
+    }
+
+    // Polite jittered delay, then navigate to next URL
+    const delay = DEEP_DELAY_MIN + Math.random() * (DEEP_DELAY_MAX - DEEP_DELAY_MIN);
+    updateDeepPanel(state, `Phase 2 — ${state.cursor}/${state.queue.length} (waiting ${Math.round(delay)}ms)`);
+    await sleep(delay);
+    location.href = state.queue[state.cursor];
+  }
+
+  async function deepFinish(state, status) {
+    state.status = status;
+    state.finishedAt = Date.now();
+    await setDeepState(state);
+    // Bring user back to bookmarks page so they can see the summary panel
+    if (location.pathname !== "/i/bookmarks") {
+      location.href = "https://x.com/i/bookmarks";
+    } else {
+      updateDeepPanel(state);
+    }
+  }
+
+  async function startDeepExport() {
+    let dirHandle = await loadHandle();
+    if (dirHandle) {
+      const ok = await ensurePermission(dirHandle);
+      if (!ok) dirHandle = null;
+    }
+    if (!dirHandle) {
+      try {
+        dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+        await saveHandle(dirHandle);
+      } catch {
+        return;
+      }
+    }
+    const state = {
+      status: "running",
+      phase: "collecting",
+      queue: [],
+      cursor: 0,
+      completed: 0,
+      failed: [],
+      startedAt: Date.now(),
+    };
+    await setDeepState(state);
+    showDeepPanel(state);
+    await deepCollectURLs(state);
+  }
+
+  // Boot-time resume: if the user reloads or navigates away mid-export,
+  // re-running the script picks up where it left off.
+  async function maybeResumeDeepExport() {
+    const state = await getDeepState();
+    if (!state) return false;
+
+    showDeepPanel(state);
+
+    if (state.status === "done" || state.status === "cancelled") {
+      updateDeepPanel(state);
+      return true;
+    }
+    if (state.status !== "running") return false;
+
+    if (state.phase === "collecting") {
+      if (location.pathname === "/i/bookmarks") {
+        await deepCollectURLs(state);
+      } else {
+        updateDeepPanel(state, "⏸ Paused — return to x.com/i/bookmarks to resume");
+      }
+      return true;
+    }
+
+    if (state.phase === "processing") {
+      if (state.cursor >= state.queue.length) {
+        await deepFinish(state, "done");
+        return true;
+      }
+      const expected = state.queue[state.cursor];
+      const expectedPath = expected.replace(/^https?:\/\/[^/]+/, "");
+      if (location.pathname + location.search === expectedPath || location.pathname === expectedPath.split("?")[0]) {
+        await deepProcessCurrent(state);
+      } else if (isStatusDetailPage()) {
+        // We're on some status page; assume X redirected (e.g. canonical URL).
+        // Process it anyway.
+        await deepProcessCurrent(state);
+      } else {
+        // Wrong page — drive ourselves back to the queue
+        location.href = expected;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // Deep-export overlay (uses same CSS classes as the regular export overlay).
+  let deepPanel = null;
+
+  function showDeepPanel(state) {
+    if (deepPanel) deepPanel.remove();
+    deepPanel = document.createElement("div");
+    deepPanel.id = "tx-bm-deep-overlay";
+    deepPanel.className = "tx-bm-deep";
+    deepPanel.innerHTML = `
+      <div class="tx-bm-title">🌊 Deep export</div>
+      <div class="tx-bm-counter">Starting…</div>
+      <div class="tx-bm-actions">
+        <button class="tx-bm-cancel">Cancel</button>
+      </div>
+    `;
+    document.body.appendChild(deepPanel);
+    deepPanel.querySelector(".tx-bm-cancel").addEventListener("click", async () => {
+      const s = await getDeepState();
+      if (!s) return;
+      s.status = "cancelled";
+      await setDeepState(s);
+      updateDeepPanel(s);
+    });
+  }
+
+  function updateDeepPanel(state, customMsg) {
+    if (!deepPanel) return;
+    const counter = deepPanel.querySelector(".tx-bm-counter");
+    const actions = deepPanel.querySelector(".tx-bm-actions");
+    if (state.status === "cancelled") {
+      counter.textContent = `⛔ Cancelled — ${state.completed || 0} done, ${state.queue.length - state.cursor} remaining`;
+      actions.innerHTML = '<button class="tx-bm-close">Close</button>';
+    } else if (state.status === "done") {
+      counter.textContent = `✅ Done — ${state.completed} captured, ${state.failed.length} failed`;
+      actions.innerHTML = '<button class="tx-bm-close">Close</button>';
+    } else if (state.phase === "collecting") {
+      counter.textContent = customMsg || `Phase 1 — collecting URLs: ${state.queue.length}`;
+    } else if (state.phase === "processing") {
+      counter.textContent = customMsg || `Phase 2 — ${state.cursor}/${state.queue.length} (${state.completed} done, ${state.failed.length} failed)`;
+    }
+    const closeBtn = actions.querySelector(".tx-bm-close");
+    if (closeBtn) {
+      closeBtn.addEventListener("click", async () => {
+        await clearDeepState();
+        if (deepPanel) {
+          deepPanel.remove();
+          deepPanel = null;
+        }
+      });
+    }
+  }
+
   // ---------- Boot ----------
 
   // The header isn't always present at document_idle; SPA navigation also
@@ -784,4 +1074,8 @@
   const observer = new MutationObserver(() => injectExportButton());
   observer.observe(document.body, { childList: true, subtree: true });
   injectExportButton();
+
+  // If a deep export is in progress (or just finished) the script needs
+  // to either resume the queue or show the summary panel.
+  maybeResumeDeepExport().catch((e) => console.error("[Deep export] resume failed", e));
 })();

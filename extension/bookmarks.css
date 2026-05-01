@@ -13,6 +13,44 @@
 .tx-bm-trigger:hover { background: #1a8cd8; }
 .tx-bm-trigger:active { transform: scale(0.97); }
 
+.tx-bm-trigger.tx-bm-trigger--deep {
+  background: #794bc4;
+  margin-left: 6px;
+}
+.tx-bm-trigger.tx-bm-trigger--deep:hover { background: #6a3ab1; }
+
+#tx-bm-deep-overlay {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  background: #1c0f2e;
+  color: #f7f9f9;
+  border: 1px solid rgba(121, 75, 196, 0.5);
+  border-radius: 12px;
+  padding: 14px 18px;
+  z-index: 10000;
+  min-width: 280px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+#tx-bm-deep-overlay .tx-bm-title { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+#tx-bm-deep-overlay .tx-bm-counter { font-size: 13px; color: #c5b6e2; margin-bottom: 10px; }
+#tx-bm-deep-overlay .tx-bm-actions { display: flex; justify-content: flex-end; }
+#tx-bm-deep-overlay .tx-bm-cancel,
+#tx-bm-deep-overlay .tx-bm-close {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border: none;
+  padding: 6px 14px;
+  font-size: 13px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+#tx-bm-deep-overlay .tx-bm-cancel:hover,
+#tx-bm-deep-overlay .tx-bm-close:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
 #tx-bm-overlay {
   position: fixed;
   top: 16px;
