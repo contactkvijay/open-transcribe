@@ -260,13 +260,21 @@
     };
   }
 
+  // Cap on captured sub-posts (replies + author thread continuations) per
+  // bookmark. X often has hundreds of replies on a popular tweet; we keep
+  // the top N as they appear in the rendered DOM (X's own ranking).
+  const SUBPOST_LIMIT = 20;
+
   // On a status detail page, capture the surrounding conversation. Articles
   // BEFORE the bookmarked one in document order = conversation parents
-  // (the chain that leads up to this bookmark). Articles AFTER = sub-posts
-  // (replies / thread continuations / quote-tweets-this-tweet). We split
-  // them so Obsidian-style notes can show the parent chain distinctly
-  // and render parents as [[wikilinks]] when those parents also exist on
-  // disk.
+  // (the chain that leads up to this bookmark). Articles AFTER = sub-posts.
+  //
+  // Sub-posts are flagged isAuthor=true when posted by the same handle as
+  // the bookmarked tweet -- those are "thread continuations" (the post
+  // continued in the comments). Other sub-posts are regular replies.
+  // Both kinds rendered separately in the .md so the second-brain notes
+  // show the author's own continuation as a coherent thread, distinct
+  // from random replies.
   function extractTweetWithThread(article) {
     const main = extractTweet(article);
     if (!main) return null;
@@ -278,6 +286,7 @@
     const mainIndex = all.indexOf(article);
     const seenIds = new Set([main.id]);
 
+    let subCount = 0;
     for (let i = 0; i < all.length; i++) {
       const a = all[i];
       if (a === article) continue;
@@ -287,8 +296,14 @@
       seenIds.add(t.id);
       t.subPosts = [];
       t.parentChain = [];
-      if (i < mainIndex) main.parentChain.push(t);
-      else main.subPosts.push(t);
+      t.isAuthor = (t.author.handle || "").toLowerCase() === (main.author.handle || "").toLowerCase();
+      if (i < mainIndex) {
+        main.parentChain.push(t);
+      } else {
+        if (subCount >= SUBPOST_LIMIT) continue;
+        main.subPosts.push(t);
+        subCount++;
+      }
     }
     return main;
   }
@@ -333,10 +348,15 @@
     lines.push(`bookmarked_at: ${yamlString(exportedAt)}`);
     lines.push(`has_video: ${tweet.hasVideo ? "true" : "false"}`);
     lines.push(`image_count: ${(tweet.images || []).length}`);
-    lines.push(`has_thread: ${(tweet.subPosts || []).length > 0 ? "true" : "false"}`);
-    lines.push(`subpost_count: ${(tweet.subPosts || []).length}`);
+    const subPosts = tweet.subPosts || [];
+    const continuations = subPosts.filter((s) => s.isAuthor).length;
+    const replies = subPosts.length - continuations;
+    lines.push(`has_thread: ${subPosts.length > 0 ? "true" : "false"}`);
+    lines.push(`subpost_count: ${subPosts.length}`);
+    lines.push(`thread_count: ${continuations}`);
+    lines.push(`comment_count: ${replies}`);
     lines.push(`parent_count: ${(tweet.parentChain || []).length}`);
-    lines.push(`tags: [bookmark${tweet.isArticle ? ", article" : ""}${tweet.hasVideo ? ", video" : ""}]`);
+    lines.push(`tags: [bookmark${tweet.isArticle ? ", article" : ""}${tweet.hasVideo ? ", video" : ""}${continuations > 0 ? ", thread" : ""}]`);
     lines.push("---");
     return lines.join("\n");
   }
@@ -405,18 +425,15 @@
       }
       lines.push("");
     }
-    if (tweet.subPosts && tweet.subPosts.length > 0) {
-      lines.push("---");
-      lines.push("");
-      lines.push("## Thread / sub-posts");
-      lines.push("");
-      for (const sub of tweet.subPosts) {
+    const subs = tweet.subPosts || [];
+    if (subs.length > 0) {
+      const continuations = subs.filter((s) => s.isAuthor);
+      const replies = subs.filter((s) => !s.isAuthor);
+
+      const renderSub = (sub) => {
         lines.push(`### ${sub.author.name} (@${sub.author.handle}) — ${formatLocalDate(sub.timestamp)}`);
         lines.push("");
-        if (sub.text) {
-          lines.push(sub.text);
-          lines.push("");
-        }
+        if (sub.text) { lines.push(sub.text); lines.push(""); }
         if (sub.images.length > 0) {
           sub.images.forEach((url, i) => lines.push(`![sub-image ${i + 1}](${url})`));
           lines.push("");
@@ -435,6 +452,26 @@
         }
         lines.push(`[Permalink](${sub.permalink})`);
         lines.push("");
+      };
+
+      if (continuations.length > 0) {
+        lines.push("---");
+        lines.push("");
+        lines.push(`## Thread continuations by @${tweet.author.handle}`);
+        lines.push("");
+        lines.push(`_(${continuations.length} post${continuations.length === 1 ? "" : "s"} where the author continues this bookmark in the replies)_`);
+        lines.push("");
+        for (const sub of continuations) renderSub(sub);
+      }
+
+      if (replies.length > 0) {
+        lines.push("---");
+        lines.push("");
+        lines.push(`## Top comments (${replies.length})`);
+        lines.push("");
+        lines.push(`_(top ${replies.length} replies as ranked by X at capture time, max ${SUBPOST_LIMIT} total sub-posts)_`);
+        lines.push("");
+        for (const sub of replies) renderSub(sub);
       }
     }
     return lines.join("\n");
@@ -450,10 +487,13 @@
   }
 
   const CSV_HEADER =
-    "tweet_id,author_name,author_handle,posted_at,bookmarked_at,permalink,has_video,image_count,is_article,has_thread,subpost_count,text_preview,md_filename";
+    "tweet_id,author_name,author_handle,posted_at,bookmarked_at,permalink,has_video,image_count,is_article,has_thread,subpost_count,thread_count,comment_count,text_preview,md_filename";
 
   function tweetToCsvRow(tweet, exportedAt) {
     const preview = (tweet.text || "").replace(/\s+/g, " ").slice(0, 120);
+    const subs = tweet.subPosts || [];
+    const continuations = subs.filter((s) => s.isAuthor).length;
+    const replies = subs.length - continuations;
     return [
       tweet.id,
       tweet.author.name,
@@ -464,8 +504,10 @@
       tweet.hasVideo ? "yes" : "no",
       tweet.images.length,
       tweet.isArticle ? "yes" : "no",
-      (tweet.subPosts && tweet.subPosts.length > 0) ? "yes" : "no",
-      (tweet.subPosts || []).length,
+      subs.length > 0 ? "yes" : "no",
+      subs.length,
+      continuations,
+      replies,
       preview,
       bookmarkFilename(tweet),
     ]
@@ -1545,6 +1587,23 @@
     const expected = queue[state.cursor];
     const tStart = Date.now();
     const article = await waitForArticleStable(15000);
+
+    // Coax X into rendering more replies into DOM before extraction so we
+    // can capture the top ~20 comments + author thread continuations. X
+    // virtualizes its reply list; without scrolling, only the first few
+    // are present.
+    if (article) {
+      try {
+        for (let i = 0; i < 2; i++) {
+          window.scrollBy(0, window.innerHeight);
+          await sleep(1200);
+        }
+        // Brief return to top so the bookmarked article is the one we
+        // pick up first when extractTweetWithThread queries.
+        window.scrollTo(0, 0);
+        await sleep(400);
+      } catch {}
+    }
 
     let completedDelta = 0;
     let newFailure = null;
