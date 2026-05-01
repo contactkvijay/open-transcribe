@@ -73,6 +73,19 @@
 #tx-bm-deep-overlay .tx-bm-resume:hover { background: #6a3ab1; }
 #tx-bm-deep-overlay .tx-bm-discard:hover { background: rgba(255, 255, 255, 0.2); }
 
+#tx-bm-deep-overlay .tx-bm-retry-backend {
+  background: #1d9bf0;
+  color: #fff;
+  border: none;
+  padding: 6px 14px;
+  font-size: 13px;
+  border-radius: 999px;
+  cursor: pointer;
+  margin-right: 8px;
+}
+#tx-bm-deep-overlay .tx-bm-retry-backend:hover { background: #1a8cd8; }
+#tx-bm-deep-overlay .tx-bm-retry-backend[disabled] { opacity: 0.7; cursor: wait; }
+
 .tx-bm-trigger.tx-bm-trigger--integrity {
   background: #5d6970;
   margin-left: 6px;

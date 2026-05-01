@@ -260,27 +260,35 @@
     };
   }
 
-  // On a status detail page, also capture all the other <article> elements
-  // visible on the page — these are the thread continuations from the same
-  // author plus replies. "Sub-posts." Filter out anything inside <aside>
-  // (right sidebar / trends / recommendations) and anything that doesn't
-  // resolve to a /handle/status/id permalink.
+  // On a status detail page, capture the surrounding conversation. Articles
+  // BEFORE the bookmarked one in document order = conversation parents
+  // (the chain that leads up to this bookmark). Articles AFTER = sub-posts
+  // (replies / thread continuations / quote-tweets-this-tweet). We split
+  // them so Obsidian-style notes can show the parent chain distinctly
+  // and render parents as [[wikilinks]] when those parents also exist on
+  // disk.
   function extractTweetWithThread(article) {
     const main = extractTweet(article);
     if (!main) return null;
+    main.parentChain = [];
     if (!isStatusDetailPage()) return main;
 
     const mainEl = document.querySelector("main") || document.body;
+    const all = Array.from(mainEl.querySelectorAll("article"));
+    const mainIndex = all.indexOf(article);
     const seenIds = new Set([main.id]);
-    for (const a of mainEl.querySelectorAll("article")) {
+
+    for (let i = 0; i < all.length; i++) {
+      const a = all[i];
       if (a === article) continue;
       if (a.closest("aside")) continue;
-      const sub = extractTweet(a);
-      if (!sub || seenIds.has(sub.id)) continue;
-      seenIds.add(sub.id);
-      // Sub-posts shouldn't recurse into their own threads.
-      sub.subPosts = [];
-      main.subPosts.push(sub);
+      const t = extractTweet(a);
+      if (!t || seenIds.has(t.id)) continue;
+      seenIds.add(t.id);
+      t.subPosts = [];
+      t.parentChain = [];
+      if (i < mainIndex) main.parentChain.push(t);
+      else main.subPosts.push(t);
     }
     return main;
   }
@@ -298,10 +306,59 @@
     return `${datePart}_${safeHandle}_${tweet.id}.md`;
   }
 
-  function tweetToMarkdown(tweet) {
+  // Escape a string for safe inclusion as a YAML scalar value. We always
+  // double-quote so colons/special chars don't trip the parser.
+  function yamlString(s) {
+    if (s == null) return '""';
+    return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, " ") + '"';
+  }
+  function yamlList(arr) {
+    if (!arr || arr.length === 0) return "[]";
+    return "[" + arr.map(yamlString).join(", ") + "]";
+  }
+
+  function tweetFrontmatter(tweet) {
+    const postedDate = (tweet.timestamp || "").slice(0, 10);
+    const exportedAt = new Date().toISOString();
+    const lines = ["---"];
+    lines.push(`title: ${yamlString(`@${tweet.author.handle} — ${(tweet.text || "").slice(0, 60).replace(/\s+/g, " ").trim()}`)}`);
+    lines.push(`author: ${yamlString(tweet.author.name)}`);
+    lines.push(`handle: ${yamlString(tweet.author.handle)}`);
+    lines.push(`posted: ${yamlString(tweet.timestamp || "")}`);
+    if (postedDate) lines.push(`posted_date: ${postedDate}`);
+    lines.push(`tweet_id: ${yamlString(tweet.id)}`);
+    lines.push(`permalink: ${yamlString(tweet.permalink)}`);
+    lines.push(`type: ${tweet.isArticle ? "article" : "tweet"}`);
+    lines.push(`source: x.com`);
+    lines.push(`bookmarked_at: ${yamlString(exportedAt)}`);
+    lines.push(`has_video: ${tweet.hasVideo ? "true" : "false"}`);
+    lines.push(`image_count: ${(tweet.images || []).length}`);
+    lines.push(`has_thread: ${(tweet.subPosts || []).length > 0 ? "true" : "false"}`);
+    lines.push(`subpost_count: ${(tweet.subPosts || []).length}`);
+    lines.push(`parent_count: ${(tweet.parentChain || []).length}`);
+    lines.push(`tags: [bookmark${tweet.isArticle ? ", article" : ""}${tweet.hasVideo ? ", video" : ""}]`);
+    lines.push("---");
+    return lines.join("\n");
+  }
+
+  // Returns a wikilink to the parent's .md if we know its filename pattern,
+  // otherwise a plain permalink. Caller decides whether the parent is on
+  // disk by passing the captured-id set.
+  function parentLinkLine(parent, capturedIds) {
+    const fname = bookmarkFilename(parent).replace(/\.md$/, "");
+    if (capturedIds && capturedIds.has(parent.id)) {
+      return `[[${fname}|@${parent.author.handle}: ${(parent.text || "").slice(0, 80).replace(/\s+/g, " ").trim()}]]`;
+    }
+    return `[@${parent.author.handle}](${parent.permalink}): ${(parent.text || "").slice(0, 80).replace(/\s+/g, " ").trim()}`;
+  }
+
+  function tweetToMarkdown(tweet, opts = {}) {
+    const capturedIds = opts.capturedIds || new Set();
     const exportedAt = formatLocalDate(new Date().toISOString());
     const kind = tweet.isArticle ? "Article" : "Tweet";
     const lines = [];
+    lines.push(tweetFrontmatter(tweet));
+    lines.push("");
     lines.push(`# ${kind} by ${tweet.author.name} (@${tweet.author.handle})`);
     lines.push("");
     lines.push(`- **Posted**: ${formatLocalDate(tweet.timestamp)}`);
@@ -309,6 +366,16 @@
     lines.push(`- **Exported**: ${exportedAt}`);
     if (tweet.isArticle) lines.push(`- **Type**: long-form Article`);
     lines.push("");
+    if ((tweet.parentChain || []).length > 0) {
+      lines.push("## Conversation parents");
+      lines.push("");
+      lines.push("_(this bookmark is a reply / part of a thread; parents shown oldest first)_");
+      lines.push("");
+      for (const p of tweet.parentChain) {
+        lines.push(`- ${parentLinkLine(p, capturedIds)}`);
+      }
+      lines.push("");
+    }
     lines.push("---");
     lines.push("");
     if (tweet.text) {
@@ -417,26 +484,86 @@
     }
   }
 
+  // Cache of captured tweet IDs in the folder; used for Obsidian-style
+  // wikilinks. Built lazily, kept in sync as we write new files.
+  let CAPTURED_IDS = null;
+  async function getCapturedIds(dirHandle) {
+    if (CAPTURED_IDS) return CAPTURED_IDS;
+    const set = new Set();
+    try {
+      for await (const [name, h] of dirHandle.entries()) {
+        if (h.kind !== "file" || !name.endsWith(".md")) continue;
+        const m = name.match(/_(\d+)\.md$/);
+        if (m) set.add(m[1]);
+      }
+    } catch (e) {
+      console.warn("[Bookmarks] capturedIds scan failed", e);
+    }
+    CAPTURED_IDS = set;
+    return set;
+  }
+
+  // _search.json maintains a flat array of every captured tweet's lookup
+  // info -- handy for external tools, Obsidian Dataview, or a future
+  // search UI. Auto-updated on every write.
+  async function readSearchIndex(dirHandle) {
+    const text = await readFileText(dirHandle, "_search.json");
+    if (!text) return [];
+    try { return JSON.parse(text); } catch { return []; }
+  }
+  async function writeSearchIndex(dirHandle, entries) {
+    const fh = await dirHandle.getFileHandle("_search.json", { create: true });
+    const w = await fh.createWritable();
+    await w.write(JSON.stringify(entries, null, 1));
+    await w.close();
+  }
+  let searchQueue = Promise.resolve();
+  async function upsertSearchEntry(dirHandle, tweet) {
+    searchQueue = searchQueue.then(async () => {
+      const entries = await readSearchIndex(dirHandle);
+      const idx = entries.findIndex((e) => e.id === tweet.id);
+      const entry = {
+        id: tweet.id,
+        handle: tweet.author.handle,
+        name: tweet.author.name,
+        type: tweet.isArticle ? "article" : "tweet",
+        permalink: tweet.permalink,
+        filename: bookmarkFilename(tweet),
+        text: (tweet.text || "").slice(0, 500),
+        has_video: tweet.hasVideo,
+        image_count: (tweet.images || []).length,
+        posted: tweet.timestamp,
+      };
+      if (idx >= 0) entries[idx] = entry;
+      else entries.push(entry);
+      await writeSearchIndex(dirHandle, entries);
+    }).catch((e) => console.warn("[Bookmarks] search index update failed", e));
+    return searchQueue;
+  }
+
   // Returns a status: "created" if newly written, "upgraded" if overwritten
   // with a meaningfully better capture, "skipped" if existing content is
   // already at least as good. The upgrade path lets a re-bookmark from the
   // article-detail page replace a previously-truncated bulk-export file.
   async function writeBookmarkFile(dirHandle, tweet) {
     const filename = bookmarkFilename(tweet);
-    const newContent = tweetToMarkdown(tweet);
+    const capturedIds = await getCapturedIds(dirHandle);
+    const newContent = tweetToMarkdown(tweet, { capturedIds });
     const existing = await readFileText(dirHandle, filename);
     if (existing != null) {
       const newIsArticle = tweet.isArticle === true;
-      const existingIsArticle = /\*\*Type\*\*: long-form Article/.test(existing);
+      const existingIsArticle = /\*\*Type\*\*: long-form Article/.test(existing) || /^type:\s*article/m.test(existing);
       const isUpgrade =
         (newIsArticle && !existingIsArticle) ||
-        newContent.length > existing.length + 200; // meaningful gain in body
+        newContent.length > existing.length + 200;
       if (!isUpgrade) return "skipped";
     }
     const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
     const writable = await fileHandle.createWritable();
     await writable.write(newContent);
     await writable.close();
+    capturedIds.add(tweet.id);
+    upsertSearchEntry(dirHandle, tweet).catch(() => {});
     return existing == null ? "created" : "upgraded";
   }
 
@@ -739,6 +866,68 @@
       target.appendChild(badge);
       refreshBookmarkCount();
     }
+  }
+
+  // ---------- Server-side fallback (X syndication API via FastAPI) ----------
+
+  async function fetchTweetViaBackend(url) {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: "fetchTweetViaBackend", url });
+      if (!res || !res.ok) return null;
+      return res.data;
+    } catch (e) {
+      console.warn("[Bookmarks] backend fetch failed", url, e);
+      return null;
+    }
+  }
+
+  function backendResponseToTweet(d) {
+    if (!d || !d.id) return null;
+    return {
+      id: String(d.id),
+      author: { name: d.author_name || d.author_handle || "", handle: d.author_handle || "" },
+      timestamp: d.timestamp || new Date().toISOString(),
+      text: d.text || "",
+      images: Array.isArray(d.image_urls) ? d.image_urls : [],
+      hasVideo: !!d.has_video,
+      permalink: d.permalink || "",
+      quoted: null,
+      isArticle: false,        // syndication doesn't expose article body
+      truncated: false,
+      subPosts: [],
+      parentChain: [],
+    };
+  }
+
+  async function retryFailedViaBackend(state) {
+    const handle = await getSyncHandle();
+    if (!handle) return { recovered: 0, stillFailed: 0 };
+    const fails = state.failed || [];
+    let recovered = 0;
+    let stillFailed = 0;
+    for (const f of fails) {
+      // Skip permanent failures (deleted, unavailable) — not worth retrying.
+      if (f.kind === "deleted" || f.kind === "unavailable") {
+        stillFailed++;
+        continue;
+      }
+      const data = await fetchTweetViaBackend(f.url);
+      const tweet = backendResponseToTweet(data);
+      if (!tweet || !tweet.id) {
+        stillFailed++;
+        continue;
+      }
+      try {
+        await writeBookmarkFile(handle, tweet);
+        await appendCsvRow(handle, tweet);
+        recovered++;
+      } catch (e) {
+        console.warn("[Bookmarks] backend-recovered write failed", f.url, e);
+        stillFailed++;
+      }
+    }
+    refreshBookmarkCount().catch(() => {});
+    return { recovered, stillFailed };
   }
 
   // ---------- Folder integrity check ----------
@@ -1706,12 +1895,30 @@
     const trimNote = state.batchTrimmed > 0 ? ` · ${state.batchTrimmed} deferred (batch limit)` : "";
     const eta = computeEta(state);
     const etaSuffix = eta ? ` · ETA ~${eta}` : "";
-    if (state.status === "cancelled") {
-      counter.textContent = `⛔ Cancelled — ${state.completed || 0} done, ${state.queue.length - state.cursor} remaining${skipNote}${trimNote}`;
-      actions.innerHTML = '<button class="tx-bm-close">Close</button>';
-    } else if (state.status === "done") {
-      counter.textContent = `✅ Done — ${state.completed} captured, ${state.failed.length} failed${skipNote}${trimNote}`;
-      actions.innerHTML = '<button class="tx-bm-close">Close</button>';
+    if (state.status === "cancelled" || state.status === "done") {
+      const verb = state.status === "cancelled" ? "⛔ Cancelled" : "✅ Done";
+      const remaining = state.status === "cancelled"
+        ? `, ${(state.queue || []).length - (state.cursor || 0)} remaining`
+        : "";
+      counter.textContent = `${verb} — ${state.completed || 0} captured, ${(state.failed || []).length} failed${remaining}${skipNote}${trimNote}`;
+      const failedRetryable = (state.failed || []).filter(
+        (f) => f.kind !== "deleted" && f.kind !== "unavailable"
+      ).length;
+      const retryBtn = (failedRetryable > 0 && !state.backendRetryDone)
+        ? `<button class="tx-bm-retry-backend">Retry ${failedRetryable} failed via backend</button>`
+        : "";
+      actions.innerHTML = retryBtn + '<button class="tx-bm-close">Close</button>';
+      const rb = actions.querySelector(".tx-bm-retry-backend");
+      if (rb) {
+        rb.addEventListener("click", async () => {
+          rb.disabled = true;
+          rb.textContent = "Retrying via backend…";
+          const fresh = await getDeepState();
+          const result = await retryFailedViaBackend(fresh || state);
+          await patchDeepState({ backendRetryDone: true, backendRecovered: result.recovered });
+          rb.textContent = `✅ ${result.recovered} recovered, ${result.stillFailed} still failed`;
+        });
+      }
     } else if (state.phase === "collecting") {
       counter.textContent = customMsg || `Phase 1 — collecting URLs: ${state.queue.length}`;
     } else if (state.phase === "processing" || state.phase === "retrying") {

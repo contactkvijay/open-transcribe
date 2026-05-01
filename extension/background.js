@@ -166,6 +166,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data });
           return;
         }
+        case "fetchTweetViaBackend": {
+          const data = await api(`/api/x/tweet?url=${encodeURIComponent(msg.url)}`);
+          sendResponse({ ok: true, data });
+          return;
+        }
         case "history": {
           const data = await listHistory();
           sendResponse({ ok: true, data });

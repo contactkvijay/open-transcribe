@@ -15,6 +15,7 @@ from models import Transcript
 from routers import auth as auth_router
 from routers import history as history_router
 from routers import transcribe as transcribe_router
+from routers import x_tweet as x_tweet_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,6 +89,7 @@ app.add_middleware(
 app.include_router(auth_router.router)
 app.include_router(transcribe_router.router)
 app.include_router(history_router.router)
+app.include_router(x_tweet_router.router)
 
 
 @app.get("/health")
