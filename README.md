@@ -6,9 +6,9 @@ Built as a personal-utility weekend project. Open-sourced under MIT — fork it,
 
 ## Demo
 
-<video src="https://github.com/contactkvijay/open-transcribe/raw/main/Demo.mp4" controls muted loop playsinline width="800"></video>
+![Demo: clicking the MP3 and Text buttons on an X.com video](./Demo.gif)
 
-<sub>(If your viewer doesn't render the video inline, [open it directly](./Demo.mp4).)</sub>
+<sub>(Higher quality with audio: [open the MP4 directly](./Demo.mp4).)</sub>
 
 ## Architecture
 
