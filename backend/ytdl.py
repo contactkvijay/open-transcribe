@@ -45,7 +45,7 @@ def extract_audio(url: str) -> AudioResult:
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": "128",
+                "preferredquality": "64",
             }
         ],
     }
