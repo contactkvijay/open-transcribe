@@ -1,6 +1,6 @@
 # open-transcribe
 
-A Chrome extension + self-hosted FastAPI backend that adds **📥 MP3** and **📝 Text** buttons next to videos on x.com (and twitter.com). Click to download the audio, or get an instant Whisper transcript. Multi-user via Google sign-in. Per-user transcript history.
+A Chrome extension + self-hosted FastAPI backend that adds **📥 MP3** and **📝 Text** buttons next to videos on x.com, twitter.com, and youtube.com (watch pages, Shorts, and feed thumbnails). Click to download the audio, or get an instant Whisper transcript. Multi-user via Google sign-in. Per-user transcript history.
 
 Built as a personal-utility weekend project. Open-sourced under MIT — fork it, run it, change the platforms, do whatever.
 
@@ -61,7 +61,7 @@ On your desktop:
 2. Copy the extension ID, paste it into your Google OAuth client's authorized redirect URIs as `https://<EXT_ID>.chromiumapp.org/`.
 3. Open the extension's options page → paste your ngrok URL and Google Client ID → Save.
 4. Click the extension icon → Sign in with Google.
-5. Visit any X post with a video → see the 📥 MP3 and 📝 Text buttons appear on the video.
+5. Visit any X post with a video, or any YouTube watch page / Short / video thumbnail → see the 📥 MP3 and 📝 Text buttons appear.
 
 If you've never wired Google OAuth before, the [SETUP.md](./SETUP.md) walks through the Google Cloud Console steps screen-by-screen.
 
@@ -113,6 +113,20 @@ All config is in `backend/.env` (copy from `.env.example`). Key vars:
 | `JWT_SECRET` | Random 32-byte hex (`openssl rand -hex 32`). Used for session JWTs and signed audio URLs. |
 | `AUDIO_RETENTION_HOURS` | How long downloaded MP3s stay on disk before the cleanup job purges them. Default 24. |
 | `ALLOWED_ORIGINS` | CORS allowlist. `chrome-extension://*` lets any unpacked extension hit it. |
+| `YTDL_COOKIES_PATH` | Optional absolute path to a yt-dlp `cookies.txt`. Required for age-gated and members-only YouTube videos. |
+
+## YouTube auth-gated videos (optional)
+
+Public YouTube videos work out of the box. Age-gated and members-only videos need a `cookies.txt` exported from a logged-in browser.
+
+1. On any machine where you're signed into YouTube, install a cookies-export browser extension (e.g. [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)).
+2. Visit `https://www.youtube.com`, click the extension, export `cookies.txt`.
+3. `scp cookies.txt your-vps:/opt/transcribe/backend/data/cookies.txt`
+4. On the VPS: `chmod 600 /opt/transcribe/backend/data/cookies.txt` (the file grants full Google account access — keep it locked down).
+5. In `backend/.env` add: `YTDL_COOKIES_PATH=/opt/transcribe/backend/data/cookies.txt`
+6. Restart the FastAPI service.
+
+Cookies expire after a few weeks; when transcription starts failing on auth-gated videos with "Sign in to confirm…", re-export and `scp` again. The file path stays the same.
 
 ## Disclaimer
 

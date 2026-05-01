@@ -8,6 +8,88 @@
   pointer-events: auto;
 }
 
+/* YouTube watch page: sit inline in the action row next to Like/Share/Save. */
+.xtx-bar--inline {
+  position: static;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.xtx-bar--inline .xtx-btn {
+  background: #272727;
+  border: none;
+  color: #fff;
+  padding: 0 16px;
+  height: 36px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 18px;
+  line-height: 36px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  backdrop-filter: none;
+}
+.xtx-bar--inline .xtx-btn:hover {
+  background: #3f3f3f;
+}
+
+/* YouTube Shorts: vertical chip stack, sits beneath the action buttons. */
+.xtx-bar--reel {
+  position: static;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  pointer-events: auto;
+}
+.xtx-bar--reel .xtx-btn {
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+  padding: 10px 14px;
+  font-size: 12px;
+  border-radius: 999px;
+  min-width: 64px;
+  text-align: center;
+}
+.xtx-bar--reel .xtx-btn:hover {
+  background: rgba(0, 0, 0, 0.75);
+}
+
+/* YouTube thumbnails: small chip in the corner, fades in on card hover. */
+.xtx-bar--thumb {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 4px;
+  z-index: 100;
+  pointer-events: auto;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+a#thumbnail:hover .xtx-bar--thumb,
+.xtx-bar--thumb:hover {
+  opacity: 1;
+}
+.xtx-bar--thumb .xtx-btn {
+  background: rgba(0, 0, 0, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  line-height: 1.2;
+}
+.xtx-bar--thumb .xtx-btn:hover {
+  background: rgba(29, 155, 240, 0.85);
+}
+
 .xtx-btn {
   background: rgba(0, 0, 0, 0.75);
   color: #fff;

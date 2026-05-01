@@ -1,6 +1,6 @@
 # Transcribe — Complete Step-by-Step Setup Guide
 
-A Chrome extension + FastAPI backend that adds **📥 MP3** and **📝 Text** buttons next to every video on x.com (and twitter.com). Click MP3 to download the audio. Click Text to get an instant Whisper transcript. Multi-user via Google sign-in. Per-user transcript history.
+A Chrome extension + FastAPI backend that adds **📥 MP3** and **📝 Text** buttons next to every video on x.com, twitter.com, and youtube.com (watch pages, Shorts, and feed thumbnails). Click MP3 to download the audio. Click Text to get an instant Whisper transcript. Multi-user via Google sign-in. Per-user transcript history.
 
 This guide reproduces everything that was set up. Follow it from top to bottom; nothing is skipped. Wherever a value is sensitive, a placeholder like `<YOUR_GROQ_KEY>` is used.
 
@@ -255,6 +255,11 @@ AUDIO_RETENTION_HOURS=24
 ALLOWED_ORIGINS=chrome-extension://*
 HOST=0.0.0.0
 PORT=8765
+
+# --- YouTube cookies (optional) ---
+# Path to a yt-dlp cookies.txt for age-gated and members-only YouTube videos.
+# Leave blank to skip. See Phase 8.5.
+YTDL_COOKIES_PATH=
 ```
 
 Generate the JWT secret:
@@ -264,6 +269,47 @@ openssl rand -hex 32
 ```
 
 Paste it into the `.env` (replacing the placeholder).
+
+---
+
+## Phase 7.5 — VPS: YouTube cookies (optional but usually needed)
+
+YouTube increasingly serves a "Sign in to confirm you're not a bot" challenge to yt-dlp running on a VPS. To get past it, yt-dlp needs an authenticated `cookies.txt` exported from a logged-in browser. Public YouTube videos may work without cookies; age-gated and members-only videos always require them.
+
+> ⚠ **Use a burner Google account, not your main one.** A `cookies.txt` is a full session token — anyone holding the file can impersonate that account on any Google service.
+
+### 7.5.1 Export cookies on your desktop
+
+1. Install the [**Get cookies.txt LOCALLY**](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) Chrome extension. (The older `Get cookies.txt` without "LOCALLY" was forked due to spyware in some versions — use this one.)
+2. Open a **new Incognito window** and sign into YouTube with the burner account. Confirm a video plays.
+3. Click the extension icon → set the URL filter to `youtube.com` → click **Export**. You'll get `youtube.com_cookies.txt` in your Downloads.
+4. **Close the Incognito window immediately.** If the same browser session keeps refreshing the auth tokens, YouTube may rotate them and invalidate your exported file.
+
+### 7.5.2 Place the file on the VPS
+
+```bash
+# On your desktop:
+scp ~/Downloads/youtube.com_cookies.txt vijay@<YOUR_VPS_IP>:/tmp/cookies.txt
+
+# On the VPS:
+mkdir -p /opt/transcribe/backend/data
+mv /tmp/cookies.txt /opt/transcribe/backend/data/cookies.txt
+chmod 600 /opt/transcribe/backend/data/cookies.txt
+```
+
+### 7.5.3 Wire it into `.env`
+
+Edit `/opt/transcribe/backend/.env` and set:
+
+```dotenv
+YTDL_COOKIES_PATH=/opt/transcribe/backend/data/cookies.txt
+```
+
+Restart the backend (Phase 9). The next transcription attempt on YouTube uses the cookies.
+
+### 7.5.4 When cookies expire
+
+YouTube auth cookies live a few weeks. When transcription starts failing on YouTube with `Sign in to confirm you're not a bot…` or similar, repeat 7.5.1–7.5.2 — the file path stays the same.
 
 ---
 
@@ -401,10 +447,19 @@ Now that you have the extension ID, finish the OAuth client:
 3. The OAuth flow opens; pick your Gmail (must be in the Test Users list from Phase 5.3).
 4. Grant permission. Popup closes. The extension popup now shows your name + email + an empty "Recent" list.
 
-### 14.2 Try it on a real X video
+### 14.2 Try it on a real X or YouTube video
 
+**On X / Twitter**:
 1. Go to any post on x.com that has a video.
 2. Two pill buttons appear in the bottom-left of the video: **📥 MP3** and **📝 Text**.
+
+**On YouTube**:
+1. Open any YouTube watch page. **📥 MP3** and **📝 Text** chips appear in the action row alongside Like / Share / Save.
+2. Or open a Short — the chips show in the right-side action stack.
+3. Or hover any thumbnail on the home / search / channel pages — a small chip appears in the corner.
+
+Then for either platform:
+
 3. Click **📝 Text** — wait ~5–30 sec depending on video length. A modal appears with:
    - The transcript
    - **Copy** — copies to clipboard
@@ -474,6 +529,14 @@ If you ever rebuild the extension and skip this header, you'll see the issue aga
 
 **Fix**: paste the new URL into the extension's **Backend URL** option. The chromiumapp.org redirect URI does **not** change because it's the extension ID, not the ngrok URL.
 
+### YouTube transcribes fail with "Sign in to confirm you're not a bot"
+
+**Cause**: YouTube's anti-bot heuristics flag yt-dlp running on a VPS without a logged-in session. Hits even on public videos in many regions.
+
+**Fix**: follow Phase 7.5 — export a `cookies.txt` from a logged-in (burner) account in Incognito, drop it on the VPS at `/opt/transcribe/backend/data/cookies.txt`, set `YTDL_COOKIES_PATH=` in `.env`, restart the backend.
+
+When the cookies later expire (a few weeks), repeat the export — the file path stays the same.
+
 ### "App is blocked: not allowed to sign in"
 
 **Cause**: your Gmail isn't in the Test Users list while the app is in Testing mode.
@@ -491,7 +554,7 @@ Track these for later — none are required to use the tool.
 3. **Per-user usage quota / rate limiting** — currently a single user could in theory transcribe enough video to exhaust your Groq free-tier quota.
 4. **Long-video chunking** — Groq has a ~25 MB upload limit, which fits about 50 minutes of MP3 at 64 kbps (the current default in `ytdl.py`). For videos longer than that, chunk audio with ffmpeg and concatenate transcripts.
 5. **Chrome Web Store publishing** — currently the extension is loaded "unpacked" for personal use. Publishing requires a $5 developer account, a Privacy Policy, and a different OAuth client type ("Chrome Extension").
-6. **Other platforms** — yt-dlp already supports YouTube, Instagram, TikTok, Reddit, etc. Adding them is just whitelisting more domains in `manifest.json`'s `host_permissions` and `content_scripts.matches`.
+6. **More platforms** — x.com and youtube.com are built in. yt-dlp also supports Instagram, TikTok, Reddit, etc.; adding them is whitelisting more domains in `manifest.json` and writing a small platform adapter (button injection target + URL extractor) in `extension/content.js` modeled on the existing `xPlatform` / `ytPlatform` objects.
 7. **Audio chunked streaming** for instant feedback while transcription is in progress, instead of waiting for the full result.
 
 ---
@@ -511,9 +574,9 @@ Track these for later — none are required to use the tool.
 | `backend/routers/auth.py` | `POST /api/auth/google`, `GET /api/me`, `POST /api/logout` |
 | `backend/routers/transcribe.py` | `POST /api/transcribe` (with cache), `GET /api/audio/{token}` |
 | `backend/routers/history.py` | `GET /api/history`, `GET /api/history/{id}`, `DELETE /api/history/{id}` |
-| `extension/manifest.json` | MV3 manifest, host_permissions for x.com + ngrok wildcards |
+| `extension/manifest.json` | MV3 manifest, host_permissions for x.com, youtube.com + ngrok wildcards |
 | `extension/background.js` | Service worker: Google OAuth via `chrome.identity.launchWebAuthFlow`, API calls (with `ngrok-skip-browser-warning` header) |
-| `extension/content.js` | MutationObserver finds `<video>` elements on x.com, injects buttons, shows modal |
+| `extension/content.js` | Per-platform scanners: x.com `<video>` overlay, YouTube watch / Shorts / thumbnails. Injects buttons + shows modal. |
 | `extension/content.css` | Button + modal styling |
 | `extension/popup.html/js/css` | Sign-in popup, recent transcripts list |
 | `extension/options.html/js` | Settings page (Backend URL, Google Client ID) |

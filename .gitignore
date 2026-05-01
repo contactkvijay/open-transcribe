@@ -2,8 +2,11 @@ backend/.env
 backend/transcribe.db
 backend/transcribe.db-journal
 backend/tmp_audio/
+backend/data/
 backend/venv/
 backend/__pycache__/
 backend/**/__pycache__/
 *.pyc
+*.cookies.txt
+cookies.txt
 .DS_Store

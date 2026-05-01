@@ -1,36 +1,11 @@
-// Watches x.com for video elements and injects [MP3] [Text] buttons next to each.
+// Watches video sites (x.com, youtube.com) for places to inject [MP3] [Text]
+// buttons and dispatches clicks to the backend transcription pipeline.
 
-const PROCESSED = new WeakSet();
+// ---------- shared helpers ----------
 
-function tweetUrlFromVideo(videoEl) {
-  // Walk up to the article, find the timestamp link (<a> wrapping <time>) which
-  // is reliably the post's permalink.
-  let el = videoEl;
-  while (el && el.tagName !== "ARTICLE") el = el.parentElement;
-  if (!el) return null;
-  const timeLink = el.querySelector('a[href*="/status/"] time');
-  if (timeLink && timeLink.parentElement && timeLink.parentElement.href) {
-    return timeLink.parentElement.href;
-  }
-  // fallback: first /status/ link in the article
-  const anyLink = el.querySelector('a[href*="/status/"]');
-  return anyLink ? anyLink.href : null;
-}
-
-function ensureToolbar(videoEl) {
-  if (PROCESSED.has(videoEl)) return;
-  // Find the closest video container that wraps the controls; X uses several
-  // nested divs. We'll target the immediate parent of the <video>.
-  const wrapper = videoEl.closest('div[data-testid="videoComponent"]')
-    || videoEl.parentElement;
-  if (!wrapper) return;
-
-  // Make sure wrapper can position children.
-  const cs = getComputedStyle(wrapper);
-  if (cs.position === "static") wrapper.style.position = "relative";
-
+function createBar({ barClass, getUrl }) {
   const bar = document.createElement("div");
-  bar.className = "xtx-bar";
+  bar.className = barClass;
   bar.innerHTML = `
     <button class="xtx-btn" data-mode="audio" title="Download MP3">📥 MP3</button>
     <button class="xtx-btn" data-mode="text"  title="Get transcript">📝 Text</button>
@@ -40,24 +15,166 @@ function ensureToolbar(videoEl) {
     e.preventDefault();
     const btn = e.target.closest(".xtx-btn");
     if (!btn) return;
-    const url = tweetUrlFromVideo(videoEl);
+    const url = getUrl();
     if (!url) {
-      showModal({ error: "Couldn't find tweet URL for this video." });
+      showModal({ error: "Couldn't find video URL on this page." });
       return;
     }
     onClickAction(btn.dataset.mode, url, btn);
   });
-  wrapper.appendChild(bar);
-  PROCESSED.add(videoEl);
+  return bar;
 }
 
-function scan() {
-  document.querySelectorAll("video").forEach(ensureToolbar);
+// ---------- platform: x.com ----------
+
+function tweetUrlFromVideo(videoEl) {
+  let el = videoEl;
+  while (el && el.tagName !== "ARTICLE") el = el.parentElement;
+  if (!el) return null;
+  const timeLink = el.querySelector('a[href*="/status/"] time');
+  if (timeLink && timeLink.parentElement && timeLink.parentElement.href) {
+    return timeLink.parentElement.href;
+  }
+  const anyLink = el.querySelector('a[href*="/status/"]');
+  return anyLink ? anyLink.href : null;
 }
 
-const observer = new MutationObserver(() => scan());
-observer.observe(document.body, { childList: true, subtree: true });
-scan();
+const xPlatform = {
+  matches: (host) => host === "x.com" || host === "twitter.com",
+  PROCESSED: new WeakSet(),
+  scan() {
+    document.querySelectorAll("video").forEach((videoEl) => {
+      if (this.PROCESSED.has(videoEl)) return;
+      const wrapper = videoEl.closest('div[data-testid="videoComponent"]')
+        || videoEl.parentElement;
+      if (!wrapper) return;
+      const cs = getComputedStyle(wrapper);
+      if (cs.position === "static") wrapper.style.position = "relative";
+      const bar = createBar({
+        barClass: "xtx-bar",
+        getUrl: () => tweetUrlFromVideo(videoEl),
+      });
+      wrapper.appendChild(bar);
+      this.PROCESSED.add(videoEl);
+    });
+  },
+};
+
+// ---------- platform: youtube.com ----------
+
+function ytWatchUrl() {
+  const v = new URLSearchParams(location.search).get("v");
+  return v ? `https://www.youtube.com/watch?v=${v}` : null;
+}
+
+function ytShortUrl() {
+  const m = location.pathname.match(/^\/shorts\/([^/?#]+)/);
+  return m ? `https://www.youtube.com/shorts/${m[1]}` : null;
+}
+
+const ytPlatform = {
+  matches: (host) => host.endsWith("youtube.com"),
+  PROCESSED: new WeakSet(),
+  _thumbObserver: null,
+  scan() {
+    if (location.pathname === "/watch") this.scanWatch();
+    if (location.pathname.startsWith("/shorts/")) this.scanShorts();
+    this.scanThumbnails();
+  },
+  scanWatch() {
+    // YouTube has renamed the action-row container across redesigns; try
+    // each known selector in order from most-specific to broadest.
+    const candidates = [
+      "ytd-watch-metadata #top-level-buttons-computed",
+      "ytd-watch-metadata yt-flexible-actions-view-model",
+      "ytd-watch-metadata #actions-inner",
+      "ytd-watch-metadata #actions",
+      "#above-the-fold #actions",
+    ];
+    let target = null;
+    for (const sel of candidates) {
+      target = document.querySelector(sel);
+      if (target) break;
+    }
+    if (!target) {
+      console.debug("[Transcribe] scanWatch: no action-row target yet");
+      return;
+    }
+    if (this.PROCESSED.has(target)) return;
+    const bar = createBar({
+      barClass: "xtx-bar xtx-bar--inline",
+      getUrl: ytWatchUrl,
+    });
+    target.appendChild(bar);
+    this.PROCESSED.add(target);
+    console.log("[Transcribe] watch bar injected into", target);
+  },
+  scanShorts() {
+    // YouTube renders a fresh #actions stack for each reel as the user
+    // scrolls; key processing on the action element so each new short
+    // gets its own bar.
+    document.querySelectorAll("ytd-reel-video-renderer[is-active] #actions")
+      .forEach((target) => {
+        if (this.PROCESSED.has(target)) return;
+        const bar = createBar({
+          barClass: "xtx-bar xtx-bar--reel",
+          getUrl: ytShortUrl,
+        });
+        target.appendChild(bar);
+        this.PROCESSED.add(target);
+      });
+  },
+  scanThumbnails() {
+    // IntersectionObserver: only inject buttons on cards that scroll into
+    // view, so off-screen cards on long feeds don't pay the cost.
+    if (!this._thumbObserver) {
+      this._thumbObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          this.injectThumbBar(entry.target);
+          this._thumbObserver.unobserve(entry.target);
+        }
+      }, { rootMargin: "200px" });
+    }
+    document.querySelectorAll('a#thumbnail[href*="/watch?v="]').forEach((anchor) => {
+      if (this.PROCESSED.has(anchor)) return;
+      this.PROCESSED.add(anchor);
+      this._thumbObserver.observe(anchor);
+    });
+  },
+  injectThumbBar(anchor) {
+    const m = (anchor.getAttribute("href") || "").match(/[?&]v=([^&]+)/);
+    if (!m) return;
+    const cleanUrl = `https://www.youtube.com/watch?v=${m[1]}`;
+    const cs = getComputedStyle(anchor);
+    if (cs.position === "static") anchor.style.position = "relative";
+    const bar = createBar({
+      barClass: "xtx-bar xtx-bar--thumb",
+      getUrl: () => cleanUrl,
+    });
+    anchor.appendChild(bar);
+  },
+};
+
+// ---------- platform dispatch ----------
+
+const platform = [xPlatform, ytPlatform].find((p) => p.matches(location.hostname));
+
+console.log("[Transcribe] content script loaded on", location.hostname,
+  "→ platform:", platform ? (platform === xPlatform ? "x" : "youtube") : "none");
+
+if (platform) {
+  // YouTube mutates the DOM aggressively; debounce so a burst of mutations
+  // collapses into a single scan.
+  let scanTimer = 0;
+  const scan = () => {
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(() => platform.scan(), 100);
+  };
+  const observer = new MutationObserver(scan);
+  observer.observe(document.body, { childList: true, subtree: true });
+  platform.scan();
+}
 
 // ---------- click handler ----------
 

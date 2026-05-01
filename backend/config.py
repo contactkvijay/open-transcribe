@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     AUDIO_URL_TTL_SECONDS: int = 3600
     AUDIO_RETENTION_HOURS: int = 24
 
+    # Optional path to a yt-dlp cookies.txt for auth-gated content
+    # (age-gated, members-only). Leave blank to skip.
+    YTDL_COOKIES_PATH: str = ""
+
     ALLOWED_ORIGINS: str = "chrome-extension://*"
     HOST: str = "0.0.0.0"
     PORT: int = 8765

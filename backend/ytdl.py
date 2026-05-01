@@ -49,6 +49,8 @@ def extract_audio(url: str) -> AudioResult:
             }
         ],
     }
+    if settings.YTDL_COOKIES_PATH and Path(settings.YTDL_COOKIES_PATH).exists():
+        ydl_opts["cookiefile"] = settings.YTDL_COOKIES_PATH
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

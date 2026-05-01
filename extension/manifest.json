@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Transcribe (X video → text/MP3)",
-  "version": "0.1.0",
-  "description": "Adds buttons to videos on x.com to grab the audio (MP3) or transcript.",
+  "name": "Transcribe (video → text/MP3)",
+  "version": "0.2.0",
+  "description": "Adds buttons to videos on x.com and youtube.com to grab the audio (MP3) or transcript.",
   "permissions": ["identity", "storage", "downloads", "activeTab"],
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
+    "https://*.youtube.com/*",
     "https://*.ngrok-free.app/*",
     "https://*.ngrok.app/*",
     "https://*.ngrok.io/*",
@@ -18,7 +19,11 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*",
+        "https://*.youtube.com/*"
+      ],
       "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
