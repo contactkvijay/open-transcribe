@@ -84,6 +84,86 @@
     );
   }
 
+  function isStatusDetailPage() {
+    return /^\/[^/]+\/status\/\d+\/?$/.test(location.pathname);
+  }
+
+  // X Articles (long-form posts) are rendered as structured HTML inside the
+  // tweet's <article>: h1/h2/h3 headings, paragraphs, lists, code blocks,
+  // and images. The standard tweetText extractor only grabs the preview, so
+  // when we're on the article-detail page we walk the full content tree.
+  function extractArticleBody(article) {
+    const out = [];
+    const claimed = new Set();
+
+    // Action row buttons (replies / retweets / likes / bookmark / share)
+    // form a [role="group"] we don't want to scrape text from.
+    const actionGroups = article.querySelectorAll('[role="group"]');
+
+    function isInsideUserNameOrAction(el) {
+      if (el.closest('[data-testid="User-Name"]')) return true;
+      for (const g of actionGroups) if (g.contains(el)) return true;
+      return false;
+    }
+
+    function alreadyClaimedAncestor(el) {
+      let p = el.parentElement;
+      while (p && p !== article) {
+        if (claimed.has(p)) return true;
+        p = p.parentElement;
+      }
+      return false;
+    }
+
+    for (const el of article.querySelectorAll(
+      "h1, h2, h3, h4, p, ul, ol, blockquote, pre, img"
+    )) {
+      if (isInsideUserNameOrAction(el)) continue;
+      if (alreadyClaimedAncestor(el)) continue;
+
+      let md = null;
+      const tag = el.tagName;
+
+      if (/^H[1-4]$/.test(tag)) {
+        const txt = el.textContent.trim();
+        if (txt) md = "#".repeat(parseInt(tag[1])) + " " + txt;
+      } else if (tag === "P") {
+        const txt = extractTweetTextNode(el);
+        if (txt && txt.length > 0) md = txt;
+      } else if (tag === "UL" || tag === "OL") {
+        const lis = Array.from(el.querySelectorAll(":scope > li"));
+        if (lis.length) {
+          md = lis
+            .map((li, i) => {
+              const prefix = tag === "OL" ? `${i + 1}. ` : "- ";
+              return prefix + extractTweetTextNode(li);
+            })
+            .join("\n");
+          lis.forEach((li) => claimed.add(li));
+        }
+      } else if (tag === "BLOCKQUOTE") {
+        md = extractTweetTextNode(el)
+          .split("\n")
+          .map((l) => "> " + l)
+          .join("\n");
+      } else if (tag === "PRE") {
+        md = "```\n" + el.textContent.trim() + "\n```";
+      } else if (tag === "IMG") {
+        if (isTweetMediaImage(el.src)) {
+          md = `![${el.alt || ""}](${el.src})`;
+        }
+      }
+
+      if (md) {
+        out.push(md);
+        claimed.add(el);
+      }
+    }
+
+    if (out.length < 3) return null; // not enough content to look like an article body
+    return out.join("\n\n");
+  }
+
   function extractTweet(article) {
     const timeEl = article.querySelector("time");
     const timeLink = timeEl && timeEl.closest("a");
@@ -110,14 +190,29 @@
       }
     }
 
-    // Body text
-    const textEl = article.querySelector('[data-testid="tweetText"]');
-    let text = extractTweetTextNode(textEl);
+    // Body text — try the article walker first when we're on a status detail
+    // page (only place where the full long-form body is in the DOM).
+    let text = "";
+    let isArticle = false;
+    if (isStatusDetailPage()) {
+      const articleBody = extractArticleBody(article);
+      if (articleBody) {
+        text = articleBody;
+        isArticle = true;
+      }
+    }
+    if (!text) {
+      const textEl = article.querySelector('[data-testid="tweetText"]');
+      text = extractTweetTextNode(textEl);
+    }
 
-    // "Show more" indicates the rendered text is truncated.
-    const truncated = Array.from(article.querySelectorAll("button, a, span")).some(
-      (el) => el.textContent.trim() === "Show more"
-    );
+    // "Show more" indicates the rendered text is truncated. Only flag this
+    // if we didn't already capture the full article body.
+    const truncated =
+      !isArticle &&
+      Array.from(article.querySelectorAll("button, a, span")).some(
+        (el) => el.textContent.trim() === "Show more"
+      );
     if (truncated) text += "\n\n[truncated — see permalink for full text]";
 
     // Tweet-level images (filter out profile pics)
@@ -160,7 +255,34 @@
       permalink,
       quoted,
       truncated,
+      isArticle,
+      subPosts: [],
     };
+  }
+
+  // On a status detail page, also capture all the other <article> elements
+  // visible on the page — these are the thread continuations from the same
+  // author plus replies. "Sub-posts." Filter out anything inside <aside>
+  // (right sidebar / trends / recommendations) and anything that doesn't
+  // resolve to a /handle/status/id permalink.
+  function extractTweetWithThread(article) {
+    const main = extractTweet(article);
+    if (!main) return null;
+    if (!isStatusDetailPage()) return main;
+
+    const mainEl = document.querySelector("main") || document.body;
+    const seenIds = new Set([main.id]);
+    for (const a of mainEl.querySelectorAll("article")) {
+      if (a === article) continue;
+      if (a.closest("aside")) continue;
+      const sub = extractTweet(a);
+      if (!sub || seenIds.has(sub.id)) continue;
+      seenIds.add(sub.id);
+      // Sub-posts shouldn't recurse into their own threads.
+      sub.subPosts = [];
+      main.subPosts.push(sub);
+    }
+    return main;
   }
 
   // ---------- Markdown + CSV formatters ----------
@@ -178,12 +300,14 @@
 
   function tweetToMarkdown(tweet) {
     const exportedAt = formatLocalDate(new Date().toISOString());
+    const kind = tweet.isArticle ? "Article" : "Tweet";
     const lines = [];
-    lines.push(`# Tweet by ${tweet.author.name} (@${tweet.author.handle})`);
+    lines.push(`# ${kind} by ${tweet.author.name} (@${tweet.author.handle})`);
     lines.push("");
     lines.push(`- **Posted**: ${formatLocalDate(tweet.timestamp)}`);
     lines.push(`- **Permalink**: ${tweet.permalink}`);
     lines.push(`- **Exported**: ${exportedAt}`);
+    if (tweet.isArticle) lines.push(`- **Type**: long-form Article`);
     lines.push("");
     lines.push("---");
     lines.push("");
@@ -213,6 +337,38 @@
         lines.push(`> — @${tweet.quoted.handle || "unknown"}, [permalink](${tweet.quoted.permalink})`);
       }
       lines.push("");
+    }
+    if (tweet.subPosts && tweet.subPosts.length > 0) {
+      lines.push("---");
+      lines.push("");
+      lines.push("## Thread / sub-posts");
+      lines.push("");
+      for (const sub of tweet.subPosts) {
+        lines.push(`### ${sub.author.name} (@${sub.author.handle}) — ${formatLocalDate(sub.timestamp)}`);
+        lines.push("");
+        if (sub.text) {
+          lines.push(sub.text);
+          lines.push("");
+        }
+        if (sub.images.length > 0) {
+          sub.images.forEach((url, i) => lines.push(`![sub-image ${i + 1}](${url})`));
+          lines.push("");
+        }
+        if (sub.hasVideo) {
+          lines.push(`🎥 [Open video on X](${sub.permalink})`);
+          lines.push("");
+        }
+        if (sub.quoted) {
+          const qText = (sub.quoted.text || "").split("\n");
+          qText.forEach((l) => lines.push(`> ${l}`));
+          if (sub.quoted.permalink) {
+            lines.push(`> — @${sub.quoted.handle || "unknown"}, [permalink](${sub.quoted.permalink})`);
+          }
+          lines.push("");
+        }
+        lines.push(`[Permalink](${sub.permalink})`);
+        lines.push("");
+      }
     }
     return lines.join("\n");
   }
@@ -249,23 +405,36 @@
 
   // ---------- File-system writes ----------
 
-  async function fileExists(dirHandle, name) {
+  async function readFileText(dirHandle, name) {
     try {
-      await dirHandle.getFileHandle(name);
-      return true;
+      const fh = await dirHandle.getFileHandle(name);
+      return await (await fh.getFile()).text();
     } catch {
-      return false;
+      return null;
     }
   }
 
+  // Returns a status: "created" if newly written, "upgraded" if overwritten
+  // with a meaningfully better capture, "skipped" if existing content is
+  // already at least as good. The upgrade path lets a re-bookmark from the
+  // article-detail page replace a previously-truncated bulk-export file.
   async function writeBookmarkFile(dirHandle, tweet) {
     const filename = bookmarkFilename(tweet);
-    if (await fileExists(dirHandle, filename)) return false;
+    const newContent = tweetToMarkdown(tweet);
+    const existing = await readFileText(dirHandle, filename);
+    if (existing != null) {
+      const newIsArticle = tweet.isArticle === true;
+      const existingIsArticle = /\*\*Type\*\*: long-form Article/.test(existing);
+      const isUpgrade =
+        (newIsArticle && !existingIsArticle) ||
+        newContent.length > existing.length + 200; // meaningful gain in body
+      if (!isUpgrade) return "skipped";
+    }
     const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
     const writable = await fileHandle.createWritable();
-    await writable.write(tweetToMarkdown(tweet));
+    await writable.write(newContent);
     await writable.close();
-    return true;
+    return existing == null ? "created" : "upgraded";
   }
 
   async function writeCsvIndex(dirHandle, tweets) {
@@ -478,17 +647,20 @@
     return raw.replace(/^"|"$/g, "").replace(/""/g, '"');
   }
 
+  // Upsert: if a row for this tweet_id already exists, replace it (so an
+  // upgraded capture — e.g. truncated preview -> full article body —
+  // refreshes the CSV's text_preview alongside the .md file).
   async function appendCsvRow(dirHandle, tweet) {
     await csvLock(async () => {
       const current = await readCsvText(dirHandle);
       const lines = current.replace(/\n+$/, "").split("\n").filter(Boolean);
       if (lines[0] !== CSV_HEADER) lines.unshift(CSV_HEADER);
-      // Idempotent: skip if tweet already in CSV
+      const kept = [lines[0]];
       for (let i = 1; i < lines.length; i++) {
-        if (csvFirstColumn(lines[i]) === tweet.id) return;
+        if (csvFirstColumn(lines[i]) !== tweet.id) kept.push(lines[i]);
       }
-      lines.push(tweetToCsvRow(tweet, new Date().toISOString()));
-      await writeCsvText(dirHandle, lines.join("\n") + "\n");
+      kept.push(tweetToCsvRow(tweet, new Date().toISOString()));
+      await writeCsvText(dirHandle, kept.join("\n") + "\n");
     });
   }
 
@@ -547,7 +719,7 @@
   }
 
   async function onBookmarkAdded(article) {
-    const tweet = extractTweet(article);
+    const tweet = extractTweetWithThread(article);
     if (!tweet) return;
     const handle = await getSyncHandle();
     if (!handle) {
@@ -558,9 +730,15 @@
       return;
     }
     try {
-      const wrote = await writeBookmarkFile(handle, tweet);
+      const status = await writeBookmarkFile(handle, tweet);
       await appendCsvRow(handle, tweet);
-      showToast(wrote ? `📁 Saved @${tweet.author.handle}/${tweet.id.slice(-6)}` : `📁 Updated CSV for @${tweet.author.handle}`);
+      const subCount = (tweet.subPosts && tweet.subPosts.length) || 0;
+      const subSuffix = subCount > 0 ? ` + ${subCount} sub-post${subCount === 1 ? "" : "s"}` : "";
+      const verb =
+        status === "created" ? "📁 Saved" :
+        status === "upgraded" ? "📁 Upgraded" :
+        "📁 Already saved";
+      showToast(`${verb} @${tweet.author.handle}/${tweet.id.slice(-6)}${subSuffix}`);
     } catch (e) {
       console.error("[Bookmarks] sync-add failed", tweet.id, e);
       showToast(`⚠ Auto-sync failed: ${e.message || e}`, 4000);
