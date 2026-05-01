@@ -798,8 +798,8 @@
   // (same origin, accessible from every x.com page).
 
   const DEEP_KEY = "tx-bookmarks-deep-export";
-  const DEEP_DELAY_MIN = 1500; // polite delay between URL navigations
-  const DEEP_DELAY_MAX = 2500;
+  const DEEP_DELAY_MIN = 1000; // polite jittered delay (1-3s) between URL navigations
+  const DEEP_DELAY_MAX = 3000;
 
   async function getDeepState() {
     const r = await chrome.storage.local.get(DEEP_KEY);
@@ -810,6 +810,22 @@
   }
   async function clearDeepState() {
     await chrome.storage.local.remove(DEEP_KEY);
+  }
+  // Atomic read-modify-write that protects user intent: once status is
+  // "cancelled" or "done", a stale write from the loop CAN'T revive it
+  // back to "running". This kills the cancel-vs-loop race that was
+  // causing the queue to keep navigating after the user clicked Cancel.
+  async function patchDeepState(updates) {
+    const current = await getDeepState();
+    if (!current) return null;
+    if ((current.status === "cancelled" || current.status === "done") &&
+        updates.status === undefined) {
+      // Loop trying to write progress, but user already terminated. Don't.
+      return current;
+    }
+    const merged = { ...current, ...updates };
+    await setDeepState(merged);
+    return merged;
   }
 
   function permalinkFromArticle(article) {
@@ -842,15 +858,19 @@
     let lastCount = seen.size;
     let stableTicks = 0;
     while (stableTicks < 5) {
-      // Cancel check
       const fresh = await getDeepState();
       if (!fresh || fresh.status !== "running") return;
+      state = fresh;
+      seen.clear();
+      for (const u of state.queue) seen.add(u);
 
+      let added = 0;
       document.querySelectorAll('article[data-testid="tweet"]').forEach((art) => {
         const url = permalinkFromArticle(art);
         if (url && !seen.has(url)) {
           seen.add(url);
           state.queue.push(url);
+          added++;
         }
       });
 
@@ -861,31 +881,45 @@
 
       window.scrollBy(0, window.innerHeight * 0.85);
       await sleep(700 + Math.random() * 300);
-      await setDeepState(state); // persist progress
+      // Persist via atomic patch -> won't revive a cancelled run.
+      const after = await patchDeepState({ queue: state.queue });
+      if (!after || after.status !== "running") return;
     }
 
     // Transition to Phase B
-    state.phase = "processing";
-    state.cursor = 0;
-    state.totalAtStart = state.queue.length;
-    await setDeepState(state);
-    updateDeepPanel(state);
+    const after = await patchDeepState({
+      phase: "processing",
+      cursor: 0,
+      totalAtStart: state.queue.length,
+    });
+    if (!after || after.status !== "running") return;
+    updateDeepPanel(after);
 
-    if (state.queue.length === 0) {
-      await deepFinish(state, "done");
+    if (after.queue.length === 0) {
+      await deepFinish(after, "done");
       return;
     }
-    // Polite gap before kicking off processing
     await sleep(1000);
-    location.href = state.queue[0];
+    location.href = after.queue[0];
   }
 
   // Phase B (per page): on a status detail page, extract everything and
   // navigate to the next URL.
   async function deepProcessCurrent(state) {
+    // Re-read state at entry; user may have hit Cancel while page was loading.
+    const entry = await getDeepState();
+    if (!entry || entry.status !== "running") {
+      if (entry) updateDeepPanel(entry);
+      return;
+    }
+    state = entry;
     updateDeepPanel(state);
+
     const expected = state.queue[state.cursor];
-    const article = await waitForArticleStable(12000);
+    const article = await waitForArticleStable(15000);
+
+    let completedDelta = 0;
+    let newFailure = null;
 
     if (article) {
       try {
@@ -895,38 +929,48 @@
           if (handle) {
             await writeBookmarkFile(handle, tweet);
             await appendCsvRow(handle, tweet);
-            state.completed = (state.completed || 0) + 1;
+            completedDelta = 1;
           } else {
-            state.failed.push({ url: expected, reason: "no folder handle" });
+            newFailure = { url: expected, reason: "no folder handle" };
           }
         } else {
-          state.failed.push({ url: expected, reason: "extractTweet returned null" });
+          newFailure = { url: expected, reason: "extractTweet returned null" };
         }
       } catch (e) {
         console.error("[Deep export] extraction failed", expected, e);
-        state.failed.push({ url: expected, reason: e.message || String(e) });
+        newFailure = { url: expected, reason: e.message || String(e) };
       }
     } else {
-      state.failed.push({ url: expected, reason: "article never appeared (deleted, rate-limited, or blocked)" });
+      newFailure = { url: expected, reason: "article never appeared (deleted, rate-limited, or blocked)" };
     }
 
-    state.cursor++;
-    await setDeepState(state);
+    // Persist atomically; will be a no-op if user cancelled during work.
+    const updates = { cursor: state.cursor + 1 };
+    if (completedDelta) updates.completed = (state.completed || 0) + completedDelta;
+    if (newFailure) updates.failed = [...state.failed, newFailure];
+    const after = await patchDeepState(updates);
 
-    // Cancel check
-    const fresh = await getDeepState();
-    if (!fresh || fresh.status !== "running") return;
-
-    if (state.cursor >= state.queue.length) {
-      await deepFinish(state, "done");
+    if (!after || after.status !== "running") {
+      if (after) updateDeepPanel(after);
       return;
     }
 
-    // Polite jittered delay, then navigate to next URL
+    if (after.cursor >= after.queue.length) {
+      await deepFinish(after, "done");
+      return;
+    }
+
     const delay = DEEP_DELAY_MIN + Math.random() * (DEEP_DELAY_MAX - DEEP_DELAY_MIN);
-    updateDeepPanel(state, `Phase 2 — ${state.cursor}/${state.queue.length} (waiting ${Math.round(delay)}ms)`);
+    updateDeepPanel(after, `Phase 2 — ${after.cursor}/${after.queue.length} (next in ${Math.round(delay)}ms)`);
     await sleep(delay);
-    location.href = state.queue[state.cursor];
+
+    // Final pre-nav cancel check so we never navigate after Cancel.
+    const final = await getDeepState();
+    if (!final || final.status !== "running") {
+      if (final) updateDeepPanel(final);
+      return;
+    }
+    location.href = after.queue[after.cursor];
   }
 
   async function deepFinish(state, status) {
@@ -1031,11 +1075,13 @@
     `;
     document.body.appendChild(deepPanel);
     deepPanel.querySelector(".tx-bm-cancel").addEventListener("click", async () => {
-      const s = await getDeepState();
-      if (!s) return;
-      s.status = "cancelled";
-      await setDeepState(s);
-      updateDeepPanel(s);
+      const after = await patchDeepState({ status: "cancelled", finishedAt: Date.now() });
+      if (after) updateDeepPanel(after);
+      // If we're stuck on a status detail page (page may not have finished
+      // loading), bounce back to bookmarks so X is usable again immediately.
+      if (location.pathname !== "/i/bookmarks") {
+        setTimeout(() => { location.href = "https://x.com/i/bookmarks"; }, 200);
+      }
     });
   }
 
