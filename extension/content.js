@@ -82,6 +82,10 @@ const ytPlatform = {
     this.scanThumbnails();
   },
   scanWatch() {
+    // Dedup by the bar's existence anywhere on the page rather than by
+    // a remembered target element: YouTube can swap which selector wins
+    // across mutations, so a per-element WeakSet was double-injecting.
+    if (document.querySelector(".xtx-bar--inline")) return;
     // YouTube has renamed the action-row container across redesigns; try
     // each known selector in order from most-specific to broadest.
     const candidates = [
@@ -100,29 +104,66 @@ const ytPlatform = {
       console.debug("[Transcribe] scanWatch: no action-row target yet");
       return;
     }
-    if (this.PROCESSED.has(target)) return;
     const bar = createBar({
       barClass: "xtx-bar xtx-bar--inline",
       getUrl: ytWatchUrl,
     });
     target.appendChild(bar);
-    this.PROCESSED.add(target);
     console.log("[Transcribe] watch bar injected into", target);
   },
   scanShorts() {
-    // YouTube renders a fresh #actions stack for each reel as the user
-    // scrolls; key processing on the action element so each new short
-    // gets its own bar.
-    document.querySelectorAll("ytd-reel-video-renderer[is-active] #actions")
-      .forEach((target) => {
-        if (this.PROCESSED.has(target)) return;
-        const bar = createBar({
-          barClass: "xtx-bar xtx-bar--reel",
-          getUrl: ytShortUrl,
-        });
-        target.appendChild(bar);
-        this.PROCESSED.add(target);
-      });
+    // Find the active reel's action stack. YouTube has shipped several
+    // names for these containers; try them in order. Active-reel marker
+    // also varies: [is-active], .is-active class, [active], or fallback
+    // to whichever reel has visibility.
+    const activeReelSelectors = [
+      "ytd-reel-video-renderer[is-active]",
+      "ytd-reel-video-renderer.is-active",
+      "ytd-reel-video-renderer[active]",
+      "ytd-shorts-player[is-active]",
+    ];
+    let activeReel = null;
+    for (const sel of activeReelSelectors) {
+      activeReel = document.querySelector(sel);
+      if (activeReel) break;
+    }
+    // Last-resort fallback: no [is-active] match, take the reel whose
+    // <video> isn't paused (only the visible one plays).
+    if (!activeReel) {
+      const reels = document.querySelectorAll("ytd-reel-video-renderer");
+      for (const r of reels) {
+        const v = r.querySelector("video");
+        if (v && !v.paused) { activeReel = r; break; }
+      }
+    }
+    if (!activeReel) {
+      console.debug("[Transcribe] scanShorts: no active reel container");
+      return;
+    }
+    // Within the active reel, find the action button stack.
+    const actionSelectors = [
+      "#actions",
+      "#menu",
+      "ytd-reel-player-overlay-renderer #actions",
+      ".action-container",
+    ];
+    let target = null;
+    for (const sel of actionSelectors) {
+      target = activeReel.querySelector(sel);
+      if (target) break;
+    }
+    if (!target) {
+      console.debug("[Transcribe] scanShorts: active reel found but no action stack inside", activeReel);
+      return;
+    }
+    if (this.PROCESSED.has(target)) return;
+    const bar = createBar({
+      barClass: "xtx-bar xtx-bar--reel",
+      getUrl: ytShortUrl,
+    });
+    target.appendChild(bar);
+    this.PROCESSED.add(target);
+    console.log("[Transcribe] shorts bar injected into", target);
   },
   scanThumbnails() {
     // IntersectionObserver: only inject buttons on cards that scroll into
