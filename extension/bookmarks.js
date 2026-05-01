@@ -837,77 +837,87 @@
 
   function injectExportButton() {
     if (location.pathname !== "/i/bookmarks") {
-      const existing = document.getElementById("tx-bm-trigger");
-      if (existing) existing.remove();
-      const existingDeep = document.getElementById("tx-bm-deep-trigger");
-      if (existingDeep) existingDeep.remove();
+      document.getElementById("tx-bm-toolbar")?.remove();
       return;
     }
-    const target = findHeader();
-    if (!target) return;
+    if (document.getElementById("tx-bm-toolbar")) return;
 
-    if (!document.getElementById("tx-bm-trigger")) {
-      const btn = document.createElement("button");
-      btn.id = "tx-bm-trigger";
-      btn.className = "tx-bm-trigger";
-      btn.textContent = "📁 Quick export";
-      btn.title = "Fast: scrolls the bookmarks list and saves each tweet's preview to a .md file. Articles come out truncated.";
-      btn.addEventListener("click", startExport);
-      target.appendChild(btn);
-    }
-    if (!document.getElementById("tx-bm-deep-trigger")) {
-      const wrapper = document.createElement("span");
-      wrapper.id = "tx-bm-deep-wrapper";
-      wrapper.className = "tx-bm-deep-wrapper";
+    const header = findHeader();
+    const parent = header && header.parentElement;
+    if (!parent) return;
 
-      const select = document.createElement("select");
-      select.id = "tx-bm-deep-batch";
-      select.className = "tx-bm-deep-batch";
-      select.title = "How many bookmarks to process in this run";
-      [
-        ["50", "next 50"],
-        ["100", "next 100"],
-        ["200", "next 200"],
-        ["0", "all"],
-      ].forEach(([value, label]) => {
-        const opt = document.createElement("option");
-        opt.value = value;
-        opt.textContent = label;
-        if (value === "0") opt.selected = true;
-        select.appendChild(opt);
-      });
+    const toolbar = document.createElement("div");
+    toolbar.id = "tx-bm-toolbar";
+    toolbar.className = "tx-bm-toolbar";
 
-      const btn = document.createElement("button");
-      btn.id = "tx-bm-deep-trigger";
-      btn.className = "tx-bm-trigger tx-bm-trigger--deep";
-      btn.textContent = "🌊 Deep export";
-      btn.title = "Slow but complete: opens every bookmarked tweet's detail page in turn and captures the full article body, thread, and sub-posts.";
-      btn.addEventListener("click", () => {
-        const limit = parseInt(select.value, 10) || 0;
-        startDeepExport({ batchLimit: limit });
-      });
+    // Quick export
+    const quick = document.createElement("button");
+    quick.id = "tx-bm-trigger";
+    quick.className = "tx-bm-trigger";
+    quick.textContent = "📁 Quick";
+    quick.title = "Fast scroll-and-capture from the bookmarks list. Articles come out truncated; use Deep export for full content.";
+    quick.addEventListener("click", startExport);
+    toolbar.appendChild(quick);
 
-      wrapper.appendChild(select);
-      wrapper.appendChild(btn);
-      target.appendChild(wrapper);
+    // Deep export with batch dropdown (joined as one pill)
+    const deepWrap = document.createElement("span");
+    deepWrap.id = "tx-bm-deep-wrapper";
+    deepWrap.className = "tx-bm-deep-wrapper";
+
+    const select = document.createElement("select");
+    select.id = "tx-bm-deep-batch";
+    select.className = "tx-bm-deep-batch";
+    select.title = "How many bookmarks to process in this run";
+    [
+      ["50", "next 50"],
+      ["100", "next 100"],
+      ["200", "next 200"],
+      ["0", "all"],
+    ].forEach(([value, label]) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      if (value === "0") opt.selected = true;
+      select.appendChild(opt);
+    });
+
+    const deep = document.createElement("button");
+    deep.id = "tx-bm-deep-trigger";
+    deep.className = "tx-bm-trigger tx-bm-trigger--deep";
+    deep.textContent = "🌊 Deep";
+    deep.title = "Slow but complete: opens every bookmarked tweet's detail page and captures the full article + thread + top 20 sub-posts.";
+    deep.addEventListener("click", () => {
+      const limit = parseInt(select.value, 10) || 0;
+      startDeepExport({ batchLimit: limit });
+    });
+    deepWrap.appendChild(select);
+    deepWrap.appendChild(deep);
+    toolbar.appendChild(deepWrap);
+
+    // Integrity check
+    const integrity = document.createElement("button");
+    integrity.id = "tx-bm-integrity-trigger";
+    integrity.className = "tx-bm-trigger tx-bm-trigger--integrity";
+    integrity.textContent = "🔍 Check";
+    integrity.title = "Scan folder for orphan .md files or orphan CSV rows";
+    integrity.addEventListener("click", runIntegrityCheck);
+    toolbar.appendChild(integrity);
+
+    // Count badge
+    const badge = document.createElement("span");
+    badge.id = "tx-bm-count";
+    badge.className = "tx-bm-count";
+    badge.textContent = "📚 …";
+    toolbar.appendChild(badge);
+
+    // Insert as a row right after X's sticky header so we never overlap
+    // the search input or fight the header for horizontal space.
+    if (header.nextSibling) {
+      parent.insertBefore(toolbar, header.nextSibling);
+    } else {
+      parent.appendChild(toolbar);
     }
-    if (!document.getElementById("tx-bm-integrity-trigger")) {
-      const btn = document.createElement("button");
-      btn.id = "tx-bm-integrity-trigger";
-      btn.className = "tx-bm-trigger tx-bm-trigger--integrity";
-      btn.textContent = "🔍 Check folder";
-      btn.title = "Scan folder for orphan .md files (in folder but not in CSV) or orphan CSV rows (in CSV but no .md file)";
-      btn.addEventListener("click", runIntegrityCheck);
-      target.appendChild(btn);
-    }
-    if (!document.getElementById("tx-bm-count")) {
-      const badge = document.createElement("span");
-      badge.id = "tx-bm-count";
-      badge.className = "tx-bm-count";
-      badge.textContent = "📚 …";
-      target.appendChild(badge);
-      refreshBookmarkCount();
-    }
+    refreshBookmarkCount();
   }
 
   // ---------- Server-side fallback (X syndication API via FastAPI) ----------
