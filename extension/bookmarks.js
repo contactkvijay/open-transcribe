@@ -447,6 +447,157 @@
     }
   }
 
+  // ---------- Auto-sync: live bookmark/unbookmark -> folder + CSV ----------
+
+  // Serialize CSV ops so concurrent clicks don't read-modify-write race.
+  let csvQueue = Promise.resolve();
+  function csvLock(fn) {
+    csvQueue = csvQueue.then(fn).catch((e) => console.error("[Bookmarks] CSV op failed", e));
+    return csvQueue;
+  }
+
+  async function readCsvText(dirHandle) {
+    try {
+      const fh = await dirHandle.getFileHandle("bookmarks.csv");
+      return await (await fh.getFile()).text();
+    } catch {
+      return CSV_HEADER + "\n";
+    }
+  }
+
+  async function writeCsvText(dirHandle, content) {
+    const fh = await dirHandle.getFileHandle("bookmarks.csv", { create: true });
+    const writable = await fh.createWritable();
+    await writable.write(content);
+    await writable.close();
+  }
+
+  function csvFirstColumn(line) {
+    // First column may be quoted ("123") or bare (123). Strip wrapping quotes.
+    const raw = line.split(",")[0] || "";
+    return raw.replace(/^"|"$/g, "").replace(/""/g, '"');
+  }
+
+  async function appendCsvRow(dirHandle, tweet) {
+    await csvLock(async () => {
+      const current = await readCsvText(dirHandle);
+      const lines = current.replace(/\n+$/, "").split("\n").filter(Boolean);
+      if (lines[0] !== CSV_HEADER) lines.unshift(CSV_HEADER);
+      // Idempotent: skip if tweet already in CSV
+      for (let i = 1; i < lines.length; i++) {
+        if (csvFirstColumn(lines[i]) === tweet.id) return;
+      }
+      lines.push(tweetToCsvRow(tweet, new Date().toISOString()));
+      await writeCsvText(dirHandle, lines.join("\n") + "\n");
+    });
+  }
+
+  async function removeCsvRow(dirHandle, tweetId) {
+    await csvLock(async () => {
+      const current = await readCsvText(dirHandle);
+      const lines = current.replace(/\n+$/, "").split("\n").filter(Boolean);
+      if (lines.length < 2) return;
+      const filtered = [lines[0]];
+      let removed = false;
+      for (let i = 1; i < lines.length; i++) {
+        if (csvFirstColumn(lines[i]) === tweetId) {
+          removed = true;
+          continue;
+        }
+        filtered.push(lines[i]);
+      }
+      if (!removed) return;
+      await writeCsvText(dirHandle, filtered.join("\n") + "\n");
+    });
+  }
+
+  // Toast for non-blocking feedback on auto-sync events.
+  function showToast(message, ms = 1800) {
+    let toast = document.getElementById("tx-bm-toast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.id = "tx-bm-toast";
+      document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.classList.add("tx-bm-toast--visible");
+    clearTimeout(toast._dismissTimer);
+    toast._dismissTimer = setTimeout(() => {
+      toast.classList.remove("tx-bm-toast--visible");
+    }, ms);
+  }
+
+  // Cache the directory handle + permission to avoid re-prompting on every
+  // click. Permission is rechecked lazily.
+  const SYNC = {
+    dirHandle: null,
+    warnedNoFolder: false,
+  };
+
+  async function getSyncHandle() {
+    if (SYNC.dirHandle) {
+      const opts = { mode: "readwrite" };
+      if ((await SYNC.dirHandle.queryPermission(opts)) === "granted") return SYNC.dirHandle;
+    }
+    const handle = await loadHandle();
+    if (!handle) return null;
+    if (!(await ensurePermission(handle))) return null;
+    SYNC.dirHandle = handle;
+    return handle;
+  }
+
+  async function onBookmarkAdded(article) {
+    const tweet = extractTweet(article);
+    if (!tweet) return;
+    const handle = await getSyncHandle();
+    if (!handle) {
+      if (!SYNC.warnedNoFolder) {
+        SYNC.warnedNoFolder = true;
+        showToast('Auto-sync off — open x.com/i/bookmarks and click "Export bookmarks" once to choose a folder.', 5000);
+      }
+      return;
+    }
+    try {
+      const wrote = await writeBookmarkFile(handle, tweet);
+      await appendCsvRow(handle, tweet);
+      showToast(wrote ? `📁 Saved @${tweet.author.handle}/${tweet.id.slice(-6)}` : `📁 Updated CSV for @${tweet.author.handle}`);
+    } catch (e) {
+      console.error("[Bookmarks] sync-add failed", tweet.id, e);
+      showToast(`⚠ Auto-sync failed: ${e.message || e}`, 4000);
+    }
+  }
+
+  async function onBookmarkRemoved(article) {
+    const tweet = extractTweet(article);
+    if (!tweet) return;
+    const handle = await getSyncHandle();
+    if (!handle) return;
+    try {
+      await removeCsvRow(handle, tweet.id);
+      showToast(`🗑 Removed @${tweet.author.handle}/${tweet.id.slice(-6)} from CSV (.md kept)`);
+    } catch (e) {
+      console.error("[Bookmarks] sync-remove failed", tweet.id, e);
+    }
+  }
+
+  // Single delegated click listener for the entire X page. Cheap on
+  // non-bookmark clicks (one closest() call returning null).
+  document.addEventListener(
+    "click",
+    (e) => {
+      const addBtn = e.target.closest('[data-testid="bookmark"]');
+      const removeBtn = e.target.closest('[data-testid="removeBookmark"]');
+      if (!addBtn && !removeBtn) return;
+      const article = (addBtn || removeBtn).closest("article");
+      if (!article) return;
+      // Fire-and-forget; don't block the click. X handles its own bookmark
+      // API call independently.
+      if (addBtn) onBookmarkAdded(article);
+      else onBookmarkRemoved(article);
+    },
+    true // capture phase, runs before X's own handlers reach the button
+  );
+
   // ---------- Boot ----------
 
   // The header isn't always present at document_idle; SPA navigation also
