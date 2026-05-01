@@ -836,6 +836,38 @@
     return m ? `https://x.com${href.split("?")[0]}` : null;
   }
 
+  // Scan the folder for existing captures and classify each by quality.
+  // - "good": file already has the full article body (long-form Article) or is
+  //   a regular tweet whose preview-text is the full content. Skip during
+  //   deep export -- no need to navigate.
+  // - "truncated": file came from the bulk Quick export (had a "Show more"
+  //   marker), or is suspiciously short, or empty. Re-process during deep
+  //   export to upgrade it.
+  async function detectExistingCaptures(dirHandle) {
+    const map = new Map(); // tweetId -> "good" | "truncated"
+    try {
+      for await (const [name, h] of dirHandle.entries()) {
+        if (h.kind !== "file") continue;
+        if (!name.endsWith(".md")) continue;
+        const m = name.match(/_(\d+)\.md$/);
+        if (!m) continue;
+        const tweetId = m[1];
+        try {
+          const text = await (await h.getFile()).text();
+          const isArticle = /\*\*Type\*\*:\s*long-form Article/.test(text);
+          const isTruncated = /\[truncated — see permalink for full text\]/.test(text);
+          const tooShort = text.length < 250;
+          if (isArticle) map.set(tweetId, "good");
+          else if (isTruncated || tooShort) map.set(tweetId, "truncated");
+          else map.set(tweetId, "good");
+        } catch {}
+      }
+    } catch (e) {
+      console.error("[Deep export] folder scan failed", e);
+    }
+    return map;
+  }
+
   async function waitForArticleStable(timeoutMs = 10000) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -886,11 +918,38 @@
       if (!after || after.status !== "running") return;
     }
 
+    // Phase 1.5: scan the folder for already-captured tweets and drop the
+    // "good" ones from the queue so we don't navigate to URLs we already
+    // have full content for. "Truncated" entries stay -- they need re-capture.
+    updateDeepPanel(state, `Phase 1.5 — scanning existing files (${state.queue.length} URLs)…`);
+    const dirHandle = await getSyncHandle();
+    let alreadyGood = 0;
+    let toReprocess = 0;
+    let filteredQueue = state.queue;
+    if (dirHandle) {
+      const captures = await detectExistingCaptures(dirHandle);
+      filteredQueue = [];
+      for (const url of state.queue) {
+        const m = url.match(/\/status\/(\d+)/);
+        const id = m && m[1];
+        const q = id && captures.get(id);
+        if (q === "good") alreadyGood++;
+        else {
+          if (q === "truncated") toReprocess++;
+          filteredQueue.push(url);
+        }
+      }
+    }
+
     // Transition to Phase B
     const after = await patchDeepState({
       phase: "processing",
       cursor: 0,
-      totalAtStart: state.queue.length,
+      totalFound: state.queue.length,
+      alreadyCaptured: alreadyGood,
+      reprocessing: toReprocess,
+      queue: filteredQueue,
+      totalAtStart: filteredQueue.length,
     });
     if (!after || after.status !== "running") return;
     updateDeepPanel(after);
@@ -1089,16 +1148,18 @@
     if (!deepPanel) return;
     const counter = deepPanel.querySelector(".tx-bm-counter");
     const actions = deepPanel.querySelector(".tx-bm-actions");
+    const skipNote = state.alreadyCaptured > 0 ? ` · ${state.alreadyCaptured} already-captured skipped` : "";
     if (state.status === "cancelled") {
-      counter.textContent = `⛔ Cancelled — ${state.completed || 0} done, ${state.queue.length - state.cursor} remaining`;
+      counter.textContent = `⛔ Cancelled — ${state.completed || 0} done, ${state.queue.length - state.cursor} remaining${skipNote}`;
       actions.innerHTML = '<button class="tx-bm-close">Close</button>';
     } else if (state.status === "done") {
-      counter.textContent = `✅ Done — ${state.completed} captured, ${state.failed.length} failed`;
+      counter.textContent = `✅ Done — ${state.completed} captured, ${state.failed.length} failed${skipNote}`;
       actions.innerHTML = '<button class="tx-bm-close">Close</button>';
     } else if (state.phase === "collecting") {
       counter.textContent = customMsg || `Phase 1 — collecting URLs: ${state.queue.length}`;
     } else if (state.phase === "processing") {
-      counter.textContent = customMsg || `Phase 2 — ${state.cursor}/${state.queue.length} (${state.completed} done, ${state.failed.length} failed)`;
+      counter.textContent = customMsg ||
+        `Phase 2 — ${state.cursor}/${state.queue.length} (${state.completed} done, ${state.failed.length} failed${skipNote})`;
     }
     const closeBtn = actions.querySelector(".tx-bm-close");
     if (closeBtn) {
