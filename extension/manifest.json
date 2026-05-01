@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Transcribe (video → text/MP3)",
-  "version": "0.3.0",
-  "description": "Adds buttons to videos on x.com and youtube.com to grab the audio (MP3) or transcript. Also exports your X bookmarks to a folder of .md files.",
+  "name": "Transcribe + X Bookmarks Archive",
+  "version": "0.4.0",
+  "description": "Transcribe videos on x.com and youtube.com (MP3 or text via Groq Whisper). Export your X bookmarks to an Obsidian/Notion-ready folder of Markdown files with YAML frontmatter, thread continuations, top-20 comments, conversation parents, and a CSV index. Auto-syncs new bookmarks.",
   "permissions": ["identity", "storage", "downloads", "activeTab"],
   "host_permissions": [
     "https://x.com/*",
