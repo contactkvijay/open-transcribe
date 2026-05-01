@@ -114,19 +114,6 @@ All config is in `backend/.env` (copy from `.env.example`). Key vars:
 | `AUDIO_RETENTION_HOURS` | How long downloaded MP3s stay on disk before the cleanup job purges them. Default 24. |
 | `ALLOWED_ORIGINS` | CORS allowlist. `chrome-extension://*` lets any unpacked extension hit it. |
 
-## Roadmap / TODO
-
-Things that would be welcome contributions:
-
-- [ ] systemd unit files for backend + ngrok auto-start
-- [ ] Caddy reverse-proxy config to drop ngrok in favor of a real subdomain
-- [ ] Per-user rate limiting (currently one user could in theory drain your Groq quota)
-- [ ] Long-video chunking (Groq has a ~25 MB upload limit, ~30 min of MP3 at 64 kbps)
-- [ ] Whitelist more yt-dlp-supported domains (YouTube Shorts, Instagram, TikTok, Reddit)
-- [ ] Streamed transcript display (chunk audio, show partial transcripts as they complete)
-- [ ] Dockerfile / docker-compose
-- [ ] Chrome Web Store publishing path (different OAuth client type, privacy policy required)
-
 ## Disclaimer
 
 This is a **personal-use, self-hosted tool** — you run the backend, you provide your own API keys, your transcripts stay on your server. Nothing is hosted by the maintainer.
