@@ -383,7 +383,7 @@
   }
 
   const CSV_HEADER =
-    "tweet_id,author_name,author_handle,posted_at,bookmarked_at,permalink,has_video,image_count,text_preview,md_filename";
+    "tweet_id,author_name,author_handle,posted_at,bookmarked_at,permalink,has_video,image_count,is_article,has_thread,subpost_count,text_preview,md_filename";
 
   function tweetToCsvRow(tweet, exportedAt) {
     const preview = (tweet.text || "").replace(/\s+/g, " ").slice(0, 120);
@@ -396,6 +396,9 @@
       tweet.permalink,
       tweet.hasVideo ? "yes" : "no",
       tweet.images.length,
+      tweet.isArticle ? "yes" : "no",
+      (tweet.subPosts && tweet.subPosts.length > 0) ? "yes" : "no",
+      (tweet.subPosts || []).length,
       preview,
       bookmarkFilename(tweet),
     ]
@@ -444,6 +447,109 @@
     const writable = await fileHandle.createWritable();
     await writable.write(rows.join("\n") + "\n");
     await writable.close();
+  }
+
+  // Snapshot bookmarks.csv to bookmarks.YYYY-MM-DD-HHMMSS.csv before any
+  // destructive export operation. Keeps last 5 rolling backups.
+  async function rotateCsvBackup(dirHandle) {
+    try {
+      const text = await readFileText(dirHandle, "bookmarks.csv");
+      if (!text || text.trim() === CSV_HEADER) return;
+      const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const name = `bookmarks.${ts}.csv`;
+      const fh = await dirHandle.getFileHandle(name, { create: true });
+      const w = await fh.createWritable();
+      await w.write(text);
+      await w.close();
+      // Cleanup older backups beyond the last 5
+      const backups = [];
+      for await (const [n, h] of dirHandle.entries()) {
+        if (h.kind !== "file") continue;
+        if (/^bookmarks\.\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.csv$/.test(n)) backups.push(n);
+      }
+      backups.sort();
+      while (backups.length > 5) {
+        const oldest = backups.shift();
+        try { await dirHandle.removeEntry(oldest); } catch {}
+      }
+    } catch (e) {
+      console.warn("[Bookmarks] CSV backup rotation failed", e);
+    }
+  }
+
+  // Append a single row to _health.csv after each tweet processed during
+  // deep export. Lets the user / future debugging see the raw timeline of
+  // navigations: when, where, ok/fail, how long, what kind of failure.
+  const HEALTH_HEADER = "timestamp,phase,url,status,duration_ms,kind";
+  async function appendHealthRow(dirHandle, row) {
+    try {
+      let existing = "";
+      try {
+        existing = await (await (await dirHandle.getFileHandle("_health.csv")).getFile()).text();
+      } catch {}
+      const lines = existing ? existing.replace(/\n+$/, "").split("\n").filter(Boolean) : [];
+      if (lines[0] !== HEALTH_HEADER) lines.unshift(HEALTH_HEADER);
+      lines.push(row);
+      const fh = await dirHandle.getFileHandle("_health.csv", { create: true });
+      const w = await fh.createWritable();
+      await w.write(lines.join("\n") + "\n");
+      await w.close();
+    } catch (e) {
+      console.warn("[Bookmarks] health log append failed", e);
+    }
+  }
+
+  // Write a human-readable summary at the end of a deep export run.
+  // Overwrites previous summary (one current snapshot per folder).
+  async function writeDeepExportSummary(dirHandle, state) {
+    try {
+      const lines = [];
+      const dur = state.finishedAt && state.startedAt
+        ? Math.round((state.finishedAt - state.startedAt) / 1000)
+        : null;
+      lines.push("# Deep export summary");
+      lines.push("");
+      lines.push(`- **Started**: ${formatLocalDate(new Date(state.startedAt).toISOString())}`);
+      if (state.finishedAt) lines.push(`- **Finished**: ${formatLocalDate(new Date(state.finishedAt).toISOString())}`);
+      if (dur !== null) {
+        const m = Math.floor(dur / 60);
+        const s = dur % 60;
+        lines.push(`- **Total time**: ${m}m ${s}s`);
+      }
+      lines.push(`- **Status**: ${state.status}`);
+      lines.push(`- **URLs found in bookmarks list**: ${state.totalFound || state.queue.length}`);
+      lines.push(`- **Already-captured (skipped)**: ${state.alreadyCaptured || 0}`);
+      lines.push(`- **Truncated (re-processed)**: ${state.reprocessing || 0}`);
+      if (state.batchTrimmed) lines.push(`- **Deferred (batch limit)**: ${state.batchTrimmed}`);
+      lines.push(`- **Successfully captured**: ${state.completed || 0}`);
+      lines.push(`- **Failed**: ${(state.failed || []).length}`);
+      lines.push(`- **Retried via retry queue**: ${(state.retryQueue || []).length}`);
+      lines.push("");
+      lines.push("## Settings used");
+      lines.push("");
+      lines.push(`- Per-bookmark delay: ${DEEP_DELAY_MIN / 1000}-${DEEP_DELAY_MAX / 1000}s`);
+      lines.push(`- Cooldown every ${COOLDOWN_EVERY} bookmarks: ${COOLDOWN_MS / 1000}s`);
+      lines.push(`- Max retries per URL: ${MAX_RETRIES}`);
+      lines.push(`- Rate-limit pause: ${RATE_LIMIT_PAUSE_MS / 60000} min`);
+      lines.push("");
+      if ((state.failed || []).length > 0) {
+        lines.push("## Failed URLs");
+        lines.push("");
+        lines.push("| Kind | URL | Reason |");
+        lines.push("|---|---|---|");
+        for (const f of state.failed) {
+          const reason = (f.reason || "").replace(/\|/g, "\\|");
+          lines.push(`| ${f.kind || "—"} | ${f.url} | ${reason} |`);
+        }
+        lines.push("");
+      }
+      const fh = await dirHandle.getFileHandle("_deep-export-summary.md", { create: true });
+      const w = await fh.createWritable();
+      await w.write(lines.join("\n"));
+      await w.close();
+    } catch (e) {
+      console.warn("[Bookmarks] failed to write summary", e);
+    }
   }
 
   // ---------- Capture loop ----------
@@ -581,13 +687,231 @@
       target.appendChild(btn);
     }
     if (!document.getElementById("tx-bm-deep-trigger")) {
+      const wrapper = document.createElement("span");
+      wrapper.id = "tx-bm-deep-wrapper";
+      wrapper.className = "tx-bm-deep-wrapper";
+
+      const select = document.createElement("select");
+      select.id = "tx-bm-deep-batch";
+      select.className = "tx-bm-deep-batch";
+      select.title = "How many bookmarks to process in this run";
+      [
+        ["50", "next 50"],
+        ["100", "next 100"],
+        ["200", "next 200"],
+        ["0", "all"],
+      ].forEach(([value, label]) => {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = label;
+        if (value === "0") opt.selected = true;
+        select.appendChild(opt);
+      });
+
       const btn = document.createElement("button");
       btn.id = "tx-bm-deep-trigger";
       btn.className = "tx-bm-trigger tx-bm-trigger--deep";
       btn.textContent = "🌊 Deep export";
       btn.title = "Slow but complete: opens every bookmarked tweet's detail page in turn and captures the full article body, thread, and sub-posts.";
-      btn.addEventListener("click", startDeepExport);
+      btn.addEventListener("click", () => {
+        const limit = parseInt(select.value, 10) || 0;
+        startDeepExport({ batchLimit: limit });
+      });
+
+      wrapper.appendChild(select);
+      wrapper.appendChild(btn);
+      target.appendChild(wrapper);
+    }
+    if (!document.getElementById("tx-bm-integrity-trigger")) {
+      const btn = document.createElement("button");
+      btn.id = "tx-bm-integrity-trigger";
+      btn.className = "tx-bm-trigger tx-bm-trigger--integrity";
+      btn.textContent = "🔍 Check folder";
+      btn.title = "Scan folder for orphan .md files (in folder but not in CSV) or orphan CSV rows (in CSV but no .md file)";
+      btn.addEventListener("click", runIntegrityCheck);
       target.appendChild(btn);
+    }
+    if (!document.getElementById("tx-bm-count")) {
+      const badge = document.createElement("span");
+      badge.id = "tx-bm-count";
+      badge.className = "tx-bm-count";
+      badge.textContent = "📚 …";
+      target.appendChild(badge);
+      refreshBookmarkCount();
+    }
+  }
+
+  // ---------- Folder integrity check ----------
+
+  async function runIntegrityCheck() {
+    const handle = await getSyncHandle();
+    if (!handle) {
+      alert('No folder set yet. Click "Quick export" or "Deep export" first to choose one.');
+      return;
+    }
+    // Collect .md files keyed by tweet id
+    const mdById = new Map();
+    try {
+      for await (const [name, h] of handle.entries()) {
+        if (h.kind !== "file" || !name.endsWith(".md")) continue;
+        const m = name.match(/_(\d+)\.md$/);
+        if (m) mdById.set(m[1], name);
+      }
+    } catch (e) {
+      alert("Couldn't read folder: " + (e.message || e));
+      return;
+    }
+    // Collect CSV row ids
+    const csvIds = new Set();
+    try {
+      const text = await readCsvText(handle);
+      const lines = text.replace(/\n+$/, "").split("\n").filter(Boolean);
+      for (let i = 1; i < lines.length; i++) csvIds.add(csvFirstColumn(lines[i]));
+    } catch {}
+
+    const orphanFiles = [];
+    for (const [id, name] of mdById) {
+      if (!csvIds.has(id)) orphanFiles.push({ id, name });
+    }
+    const orphanRows = [];
+    for (const id of csvIds) {
+      if (!mdById.has(id)) orphanRows.push(id);
+    }
+
+    showIntegrityModal({
+      handle,
+      orphanFiles,
+      orphanRows,
+      totalMd: mdById.size,
+      totalCsv: csvIds.size,
+    });
+  }
+
+  function showIntegrityModal({ handle, orphanFiles, orphanRows, totalMd, totalCsv }) {
+    const dlg = document.createElement("dialog");
+    dlg.id = "tx-bm-integrity-modal";
+    dlg.className = "tx-bm-integrity-modal";
+    const filesList = orphanFiles.length === 0
+      ? "<em>None — every .md is in the CSV.</em>"
+      : `<ul>${orphanFiles.slice(0, 20).map(f => `<li>${f.name}</li>`).join("")}${orphanFiles.length > 20 ? `<li>… +${orphanFiles.length - 20} more</li>` : ""}</ul>`;
+    const rowsList = orphanRows.length === 0
+      ? "<em>None — every CSV row has its .md file.</em>"
+      : `<ul>${orphanRows.slice(0, 20).map(id => `<li>tweet_id ${id}</li>`).join("")}${orphanRows.length > 20 ? `<li>… +${orphanRows.length - 20} more</li>` : ""}</ul>`;
+    dlg.innerHTML = `
+      <div class="tx-bm-integrity-inner">
+        <button class="tx-bm-integrity-close" aria-label="Close">×</button>
+        <h2>🔍 Folder integrity check</h2>
+        <p>Scanned <b>${totalMd}</b> .md files and <b>${totalCsv}</b> CSV rows.</p>
+        <h3>Orphan .md files (${orphanFiles.length})</h3>
+        <p class="tx-bm-integrity-help">.md files on disk that don't have a row in bookmarks.csv. Usually leftover from un-bookmarking, or from before the CSV was created.</p>
+        ${filesList}
+        ${orphanFiles.length > 0 ? '<button class="tx-bm-integrity-fix-rows">Add ' + orphanFiles.length + ' rows to CSV</button>' : ""}
+        <h3>Orphan CSV rows (${orphanRows.length})</h3>
+        <p class="tx-bm-integrity-help">Rows in bookmarks.csv whose .md file is missing on disk. Usually deleted manually.</p>
+        ${rowsList}
+        ${orphanRows.length > 0 ? '<button class="tx-bm-integrity-fix-files">Remove ' + orphanRows.length + ' orphan rows from CSV</button>' : ""}
+      </div>
+    `;
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    dlg.querySelector(".tx-bm-integrity-close").addEventListener("click", () => { dlg.close(); dlg.remove(); });
+
+    const addRowsBtn = dlg.querySelector(".tx-bm-integrity-fix-rows");
+    if (addRowsBtn) {
+      addRowsBtn.addEventListener("click", async () => {
+        addRowsBtn.disabled = true;
+        addRowsBtn.textContent = "Reading orphan files…";
+        let added = 0;
+        for (const { name } of orphanFiles) {
+          try {
+            const fh = await handle.getFileHandle(name);
+            const text = await (await fh.getFile()).text();
+            const tweet = parseMarkdownToTweet(text, name);
+            if (tweet) {
+              await appendCsvRow(handle, tweet);
+              added++;
+            }
+          } catch (e) {
+            console.warn("[Integrity] couldn't reconstruct row from", name, e);
+          }
+        }
+        addRowsBtn.textContent = `Added ${added} of ${orphanFiles.length}`;
+        await refreshBookmarkCount();
+      });
+    }
+
+    const removeRowsBtn = dlg.querySelector(".tx-bm-integrity-fix-files");
+    if (removeRowsBtn) {
+      removeRowsBtn.addEventListener("click", async () => {
+        removeRowsBtn.disabled = true;
+        removeRowsBtn.textContent = "Removing rows…";
+        for (const id of orphanRows) {
+          try { await removeCsvRow(handle, id); } catch {}
+        }
+        removeRowsBtn.textContent = `Removed ${orphanRows.length} rows`;
+        await refreshBookmarkCount();
+      });
+    }
+  }
+
+  // Best-effort reconstruction of a tweet object from a saved .md file,
+  // used by integrity-check when adding orphan files back to the CSV.
+  function parseMarkdownToTweet(md, filename) {
+    const m = filename.match(/_(\d+)\.md$/);
+    const id = m && m[1];
+    if (!id) return null;
+    const headerMatch = md.match(/^# (?:Tweet|Article) by (.+?) \(@([^)]+)\)/m);
+    const postedMatch = md.match(/\*\*Posted\*\*: (\S+ \S+)/);
+    const linkMatch = md.match(/\*\*Permalink\*\*: (\S+)/);
+    const isArticle = /\*\*Type\*\*:\s*long-form Article/.test(md);
+    const handle = headerMatch ? headerMatch[2] : "";
+    const name = headerMatch ? headerMatch[1] : handle;
+    const permalink = linkMatch ? linkMatch[1] : `https://x.com/${handle}/status/${id}`;
+    const timestamp = postedMatch ? postedMatch[1].replace(" ", "T") + ":00.000Z" : new Date().toISOString();
+    // Extract a short preview from the body (first line after the --- separator)
+    const bodyMatch = md.split(/\n---\n+/)[1] || "";
+    const previewLine = bodyMatch.split("\n").find((l) => l.trim() && !l.startsWith("##") && !l.startsWith("!["));
+    return {
+      id,
+      author: { name, handle },
+      timestamp,
+      text: (previewLine || "").trim(),
+      images: [],
+      hasVideo: /## Video/.test(md),
+      permalink,
+      quoted: null,
+      isArticle,
+      subPosts: [],
+    };
+  }
+
+  // Counts based on the folder's bookmarks.csv -- reflects what we've
+  // captured locally, not your actual X total. Updates when buttons
+  // re-render and after auto-sync writes.
+  async function refreshBookmarkCount() {
+    const badge = document.getElementById("tx-bm-count");
+    if (!badge) return;
+    const handle = await getSyncHandle();
+    if (!handle) {
+      badge.textContent = "📚 folder not set";
+      return;
+    }
+    try {
+      const text = await readCsvText(handle);
+      const lines = text.replace(/\n+$/, "").split("\n").filter(Boolean);
+      const n = Math.max(0, lines.length - 1); // minus header
+      // Count truncated entries by scanning .md filename column for
+      // currently truncated markers via a lightweight pass: read CSV's
+      // text_preview column for the truncated marker. Cheap heuristic.
+      let truncated = 0;
+      for (let i = 1; i < lines.length; i++) {
+        if (lines[i].includes("[truncated")) truncated++;
+      }
+      badge.textContent = truncated > 0
+        ? `📚 ${n} captured · ${truncated} need upgrade`
+        : `📚 ${n} captured`;
+    } catch {
+      badge.textContent = "📚 (error reading CSV)";
     }
   }
 
@@ -613,6 +937,9 @@
     STATE.dirHandle = dirHandle;
     STATE.captured.clear();
     STATE.cancelled = false;
+
+    // Snapshot existing CSV before this run rewrites it.
+    await rotateCsvBackup(dirHandle);
 
     showOverlay();
     try {
@@ -745,6 +1072,7 @@
     try {
       const status = await writeBookmarkFile(handle, tweet);
       await appendCsvRow(handle, tweet);
+      refreshBookmarkCount().catch(() => {});
       const subCount = (tweet.subPosts && tweet.subPosts.length) || 0;
       const subSuffix = subCount > 0 ? ` + ${subCount} sub-post${subCount === 1 ? "" : "s"}` : "";
       const verb =
@@ -765,6 +1093,7 @@
     if (!handle) return;
     try {
       await removeCsvRow(handle, tweet.id);
+      refreshBookmarkCount().catch(() => {});
       showToast(`🗑 Removed @${tweet.author.handle}/${tweet.id.slice(-6)} from CSV (.md kept)`);
     } catch (e) {
       console.error("[Bookmarks] sync-remove failed", tweet.id, e);
@@ -798,8 +1127,14 @@
   // (same origin, accessible from every x.com page).
 
   const DEEP_KEY = "tx-bookmarks-deep-export";
-  const DEEP_DELAY_MIN = 1000; // polite jittered delay (1-3s) between URL navigations
-  const DEEP_DELAY_MAX = 3000;
+  const DEEP_DELAY_MIN = 5000;     // base jittered delay between URL navigations
+  const DEEP_DELAY_MAX = 10000;
+  const COOLDOWN_EVERY = 50;       // tweets between long cooldowns
+  const COOLDOWN_MS = 30000;       // 30s pause every COOLDOWN_EVERY tweets
+  const RATE_LIMIT_PAUSE_MS = 15 * 60 * 1000; // pause 15 min on 429 detection
+  const MAX_RETRIES = 2;           // retry attempts per failed URL in retry queue
+  const BACKOFF_BASE_MS = 5000;
+  const BACKOFF_CAP_MS = 5 * 60 * 1000; // 5 min ceiling
 
   async function getDeepState() {
     const r = await chrome.storage.local.get(DEEP_KEY);
@@ -884,6 +1219,18 @@
     return null;
   }
 
+  // Classify why a page didn't yield an article. Distinguishes rate-limit
+  // (need long pause) from a deleted tweet (skip permanently) from a
+  // login wall (need user action).
+  function classifyPageFailure() {
+    const text = (document.body && document.body.innerText) || "";
+    if (/rate.?limit|too many requests|try again later/i.test(text)) return "rate-limit";
+    if (/this (post|tweet) (was|has been) (deleted|removed)/i.test(text)) return "deleted";
+    if (/(post|tweet) is unavailable|account (suspended|doesn['']t exist)/i.test(text)) return "unavailable";
+    if (/log in to (twitter|x)/i.test(text) || /sign in to (twitter|x)/i.test(text)) return "logged-out";
+    return "unknown";
+  }
+
   // Phase A: auto-scroll the bookmarks list, collect every permalink.
   async function deepCollectURLs(state) {
     const seen = new Set(state.queue);
@@ -941,6 +1288,16 @@
       }
     }
 
+    // Apply optional batch limit -- caps how many of the still-needing-work
+    // URLs we process this run. Lets the user space exports across days.
+    const batchLimit = state.batchLimit || 0;
+    let limitedQueue = filteredQueue;
+    let batchTrimmed = 0;
+    if (batchLimit > 0 && filteredQueue.length > batchLimit) {
+      limitedQueue = filteredQueue.slice(0, batchLimit);
+      batchTrimmed = filteredQueue.length - batchLimit;
+    }
+
     // Transition to Phase B
     const after = await patchDeepState({
       phase: "processing",
@@ -948,8 +1305,9 @@
       totalFound: state.queue.length,
       alreadyCaptured: alreadyGood,
       reprocessing: toReprocess,
-      queue: filteredQueue,
-      totalAtStart: filteredQueue.length,
+      batchTrimmed,
+      queue: limitedQueue,
+      totalAtStart: limitedQueue.length,
     });
     if (!after || after.status !== "running") return;
     updateDeepPanel(after);
@@ -963,7 +1321,8 @@
   }
 
   // Phase B (per page): on a status detail page, extract everything and
-  // navigate to the next URL.
+  // navigate to the next URL. Handles rate-limit auto-pause, retry queue,
+  // periodic cooldowns, and exponential backoff on consecutive failures.
   async function deepProcessCurrent(state) {
     // Re-read state at entry; user may have hit Cancel while page was loading.
     const entry = await getDeepState();
@@ -972,13 +1331,35 @@
       return;
     }
     state = entry;
+
+    // If we're inside a rate-limit pause window, idle until it expires.
+    if (state.pausedUntil && Date.now() < state.pausedUntil) {
+      const remainMs = state.pausedUntil - Date.now();
+      updateDeepPanel(state, `⏸ Rate-limit pause — resumes in ${Math.ceil(remainMs / 60000)} min`);
+      // Sleep in chunks so cancel is responsive
+      const checkInterval = 5000;
+      while (Date.now() < state.pausedUntil) {
+        await sleep(checkInterval);
+        const fresh = await getDeepState();
+        if (!fresh || fresh.status !== "running") return;
+      }
+      // Resume: navigate to current URL fresh
+      location.href = state.queue[state.cursor];
+      return;
+    }
+
     updateDeepPanel(state);
 
-    const expected = state.queue[state.cursor];
+    // Pick which queue we're working from -- main first, then retry queue
+    const onRetry = state.phase === "retrying";
+    const queue = onRetry ? state.retryQueue : state.queue;
+    const expected = queue[state.cursor];
+    const tStart = Date.now();
     const article = await waitForArticleStable(15000);
 
     let completedDelta = 0;
     let newFailure = null;
+    let kind = "ok";
 
     if (article) {
       try {
@@ -991,36 +1372,116 @@
             completedDelta = 1;
           } else {
             newFailure = { url: expected, reason: "no folder handle" };
+            kind = "no-folder";
           }
         } else {
           newFailure = { url: expected, reason: "extractTweet returned null" };
+          kind = "extract-null";
         }
       } catch (e) {
         console.error("[Deep export] extraction failed", expected, e);
         newFailure = { url: expected, reason: e.message || String(e) };
+        kind = "extract-error";
       }
     } else {
-      newFailure = { url: expected, reason: "article never appeared (deleted, rate-limited, or blocked)" };
+      kind = classifyPageFailure();
+      newFailure = { url: expected, reason: `article didn't render (${kind})` };
     }
 
-    // Persist atomically; will be a no-op if user cancelled during work.
-    const updates = { cursor: state.cursor + 1 };
-    if (completedDelta) updates.completed = (state.completed || 0) + completedDelta;
-    if (newFailure) updates.failed = [...state.failed, newFailure];
-    const after = await patchDeepState(updates);
+    // Append health-log row for this tweet (best effort, non-blocking).
+    const handleForLog = await getSyncHandle();
+    if (handleForLog) {
+      const status = completedDelta ? "ok" : (newFailure ? "fail" : "skip");
+      const row = [
+        new Date().toISOString(),
+        onRetry ? "retry" : "phase2",
+        expected,
+        status,
+        Date.now() - tStart,
+        kind,
+      ].map(csvEscape).join(",");
+      appendHealthRow(handleForLog, row).catch(() => {});
+    }
 
+    // Build state updates
+    const updates = { cursor: state.cursor + 1, lastTickAt: Date.now() };
+    let triggerPause = false;
+
+    if (completedDelta) {
+      updates.completed = (state.completed || 0) + completedDelta;
+      updates.consecutiveFailures = 0;
+      // Track per-tweet timing for ETA
+      const dur = Date.now() - tStart;
+      const recent = state.recentDurations || [];
+      updates.recentDurations = [...recent.slice(-9), dur];
+    } else {
+      updates.consecutiveFailures = (state.consecutiveFailures || 0) + 1;
+    }
+
+    if (newFailure) {
+      updates.failed = [...state.failed, { ...newFailure, kind, retryCount: state.failedAttempts?.[expected] || 0 }];
+      // Move "rate-limit" or "unknown timeout" failures into retry queue (worth re-trying).
+      // "deleted", "unavailable", "logged-out" are permanent skips.
+      if (!onRetry && (kind === "rate-limit" || kind === "unknown")) {
+        const attempts = (state.failedAttempts && state.failedAttempts[expected]) || 0;
+        if (attempts < MAX_RETRIES) {
+          updates.retryQueue = [...(state.retryQueue || []), expected];
+          updates.failedAttempts = { ...(state.failedAttempts || {}), [expected]: attempts + 1 };
+        }
+      }
+      if (kind === "rate-limit") triggerPause = true;
+    }
+
+    if (triggerPause) {
+      updates.pausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
+      updates.cursor = state.cursor; // hold on this URL; retry after pause
+    }
+
+    const after = await patchDeepState(updates);
     if (!after || after.status !== "running") {
       if (after) updateDeepPanel(after);
       return;
     }
 
-    if (after.cursor >= after.queue.length) {
+    if (triggerPause) {
+      updateDeepPanel(after, `⏸ Rate-limit detected — pausing 15 min before retrying`);
+      await sleep(RATE_LIMIT_PAUSE_MS);
+      const fresh = await getDeepState();
+      if (!fresh || fresh.status !== "running") return;
+      location.href = after.queue[after.cursor];
+      return;
+    }
+
+    // Did we finish the current queue?
+    if (after.cursor >= queue.length) {
+      // Main queue done -> switch to retry queue if any
+      if (!onRetry && (after.retryQueue || []).length > 0) {
+        const next = await patchDeepState({ phase: "retrying", cursor: 0 });
+        if (!next || next.status !== "running") return;
+        updateDeepPanel(next, `Retry pass — ${next.retryQueue.length} URLs to retry`);
+        await sleep(5000); // breather before retry pass
+        location.href = next.retryQueue[0];
+        return;
+      }
       await deepFinish(after, "done");
       return;
     }
 
-    const delay = DEEP_DELAY_MIN + Math.random() * (DEEP_DELAY_MAX - DEEP_DELAY_MIN);
-    updateDeepPanel(after, `Phase 2 — ${after.cursor}/${after.queue.length} (next in ${Math.round(delay)}ms)`);
+    // Compute next-step delay. Base jitter + exponential backoff on
+    // consecutive failures + periodic cooldown every COOLDOWN_EVERY.
+    const baseDelay = DEEP_DELAY_MIN + Math.random() * (DEEP_DELAY_MAX - DEEP_DELAY_MIN);
+    const failures = after.consecutiveFailures || 0;
+    const backoff = failures > 0
+      ? Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * Math.pow(2, failures - 1))
+      : 0;
+    const cooldown = (after.completed > 0 && after.completed % COOLDOWN_EVERY === 0) ? COOLDOWN_MS : 0;
+    const delay = baseDelay + backoff + cooldown;
+
+    let label = `Phase ${onRetry ? "Retry" : "2"} — ${after.cursor}/${queue.length}`;
+    if (cooldown) label += ` · cooldown ${Math.round(cooldown / 1000)}s`;
+    if (backoff) label += ` · backoff ${Math.round(backoff / 1000)}s`;
+    label += ` · next in ${Math.round(delay / 1000)}s`;
+    updateDeepPanel(after, label);
     await sleep(delay);
 
     // Final pre-nav cancel check so we never navigate after Cancel.
@@ -1029,22 +1490,28 @@
       if (final) updateDeepPanel(final);
       return;
     }
-    location.href = after.queue[after.cursor];
+    const finalQueue = (final.phase === "retrying") ? final.retryQueue : final.queue;
+    location.href = finalQueue[final.cursor];
   }
 
   async function deepFinish(state, status) {
-    state.status = status;
-    state.finishedAt = Date.now();
-    await setDeepState(state);
-    // Bring user back to bookmarks page so they can see the summary panel
+    const final = await patchDeepState({ status, finishedAt: Date.now() });
+    const stateOut = final || { ...state, status, finishedAt: Date.now() };
+    // Best-effort summary file write
+    try {
+      const handle = await getSyncHandle();
+      if (handle) await writeDeepExportSummary(handle, stateOut);
+    } catch (e) {
+      console.warn("[Bookmarks] summary write skipped", e);
+    }
     if (location.pathname !== "/i/bookmarks") {
       location.href = "https://x.com/i/bookmarks";
     } else {
-      updateDeepPanel(state);
+      updateDeepPanel(stateOut);
     }
   }
 
-  async function startDeepExport() {
+  async function startDeepExport(opts = {}) {
     let dirHandle = await loadHandle();
     if (dirHandle) {
       const ok = await ensurePermission(dirHandle);
@@ -1062,12 +1529,22 @@
       status: "running",
       phase: "collecting",
       queue: [],
+      retryQueue: [],
+      failedAttempts: {},
       cursor: 0,
       completed: 0,
       failed: [],
+      consecutiveFailures: 0,
+      recentDurations: [],
+      pausedUntil: 0,
       startedAt: Date.now(),
+      lastTickAt: Date.now(),
+      batchLimit: opts.batchLimit || 0, // 0 = no limit
+      userConfirmedResume: true,        // fresh start = confirmed
     };
     await setDeepState(state);
+    // Snapshot CSV before this deep export starts mutating it via upserts.
+    await rotateCsvBackup(dirHandle);
     showDeepPanel(state);
     await deepCollectURLs(state);
   }
@@ -1086,6 +1563,20 @@
     }
     if (state.status !== "running") return false;
 
+    // Resume confirmation: if the last tick was more than 60s ago, the
+    // user probably closed the browser or took a long break. Surface a
+    // dialog before silently re-driving navigations -- otherwise a casual
+    // x.com visit can re-trigger an old export they thought was done.
+    const STALE_TICK_MS = 60 * 1000;
+    const lastTick = state.lastTickAt || state.startedAt || 0;
+    const isStale = Date.now() - lastTick > STALE_TICK_MS;
+    if (isStale && !state.userConfirmedResume) {
+      showResumeConfirmation(state);
+      return true;
+    }
+    // Refresh lastTickAt so subsequent reloads within the run are recognized as fresh.
+    await patchDeepState({ lastTickAt: Date.now() });
+
     if (state.phase === "collecting") {
       if (location.pathname === "/i/bookmarks") {
         await deepCollectURLs(state);
@@ -1095,12 +1586,21 @@
       return true;
     }
 
-    if (state.phase === "processing") {
-      if (state.cursor >= state.queue.length) {
+    if (state.phase === "processing" || state.phase === "retrying") {
+      const queue = state.phase === "retrying" ? state.retryQueue : state.queue;
+      if (state.cursor >= queue.length) {
+        // Main done -> kick into retrying if there are URLs to retry
+        if (state.phase === "processing" && (state.retryQueue || []).length > 0) {
+          const next = await patchDeepState({ phase: "retrying", cursor: 0 });
+          if (next && next.status === "running" && next.retryQueue.length > 0) {
+            location.href = next.retryQueue[0];
+            return true;
+          }
+        }
         await deepFinish(state, "done");
         return true;
       }
-      const expected = state.queue[state.cursor];
+      const expected = queue[state.cursor];
       const expectedPath = expected.replace(/^https?:\/\/[^/]+/, "");
       if (location.pathname + location.search === expectedPath || location.pathname === expectedPath.split("?")[0]) {
         await deepProcessCurrent(state);
@@ -1115,6 +1615,40 @@
       return true;
     }
     return false;
+  }
+
+  // Surface a confirmation panel so a stale running state doesn't auto-resume
+  // when the user just casually opens x.com.
+  function showResumeConfirmation(state) {
+    if (deepPanel) deepPanel.remove();
+    deepPanel = document.createElement("div");
+    deepPanel.id = "tx-bm-deep-overlay";
+    deepPanel.className = "tx-bm-deep";
+    const remaining = ((state.phase === "retrying" ? state.retryQueue : state.queue) || []).length - (state.cursor || 0);
+    deepPanel.innerHTML = `
+      <div class="tx-bm-title">⏸ Deep export was paused</div>
+      <div class="tx-bm-counter">${state.completed || 0} done · ${remaining} remaining · ${(state.failed || []).length} failed</div>
+      <div class="tx-bm-actions">
+        <button class="tx-bm-resume">Resume</button>
+        <button class="tx-bm-discard">Discard</button>
+      </div>
+    `;
+    document.body.appendChild(deepPanel);
+    deepPanel.querySelector(".tx-bm-resume").addEventListener("click", async () => {
+      const after = await patchDeepState({ userConfirmedResume: true, lastTickAt: Date.now() });
+      if (after) {
+        showDeepPanel(after);
+        // Re-trigger resume flow so it actually advances the queue.
+        maybeResumeDeepExport().catch((e) => console.error("[Deep export] resume failed", e));
+      }
+    });
+    deepPanel.querySelector(".tx-bm-discard").addEventListener("click", async () => {
+      await clearDeepState();
+      if (deepPanel) {
+        deepPanel.remove();
+        deepPanel = null;
+      }
+    });
   }
 
   // Deep-export overlay (uses same CSS classes as the regular export overlay).
@@ -1135,13 +1669,33 @@
     document.body.appendChild(deepPanel);
     deepPanel.querySelector(".tx-bm-cancel").addEventListener("click", async () => {
       const after = await patchDeepState({ status: "cancelled", finishedAt: Date.now() });
-      if (after) updateDeepPanel(after);
-      // If we're stuck on a status detail page (page may not have finished
-      // loading), bounce back to bookmarks so X is usable again immediately.
+      if (after) {
+        updateDeepPanel(after);
+        // Best-effort summary write so the user can see what happened.
+        try {
+          const h = await getSyncHandle();
+          if (h) await writeDeepExportSummary(h, after);
+        } catch {}
+      }
       if (location.pathname !== "/i/bookmarks") {
         setTimeout(() => { location.href = "https://x.com/i/bookmarks"; }, 200);
       }
     });
+  }
+
+  function computeEta(state) {
+    const durations = state.recentDurations || [];
+    if (durations.length === 0) return null;
+    const avgMs = durations.reduce((a, b) => a + b, 0) / durations.length;
+    const queue = state.phase === "retrying" ? state.retryQueue : state.queue;
+    const remaining = (queue || []).length - (state.cursor || 0);
+    if (remaining <= 0) return null;
+    // Add average per-bookmark inter-step delay (~7.5s base + cooldown amortized).
+    const interMs = 7500 + (COOLDOWN_MS / COOLDOWN_EVERY);
+    const etaMs = remaining * (avgMs + interMs);
+    if (etaMs < 60_000) return `${Math.round(etaMs / 1000)}s`;
+    if (etaMs < 60 * 60_000) return `${Math.round(etaMs / 60_000)}m`;
+    return `${(etaMs / 3_600_000).toFixed(1)}h`;
   }
 
   function updateDeepPanel(state, customMsg) {
@@ -1149,17 +1703,22 @@
     const counter = deepPanel.querySelector(".tx-bm-counter");
     const actions = deepPanel.querySelector(".tx-bm-actions");
     const skipNote = state.alreadyCaptured > 0 ? ` · ${state.alreadyCaptured} already-captured skipped` : "";
+    const trimNote = state.batchTrimmed > 0 ? ` · ${state.batchTrimmed} deferred (batch limit)` : "";
+    const eta = computeEta(state);
+    const etaSuffix = eta ? ` · ETA ~${eta}` : "";
     if (state.status === "cancelled") {
-      counter.textContent = `⛔ Cancelled — ${state.completed || 0} done, ${state.queue.length - state.cursor} remaining${skipNote}`;
+      counter.textContent = `⛔ Cancelled — ${state.completed || 0} done, ${state.queue.length - state.cursor} remaining${skipNote}${trimNote}`;
       actions.innerHTML = '<button class="tx-bm-close">Close</button>';
     } else if (state.status === "done") {
-      counter.textContent = `✅ Done — ${state.completed} captured, ${state.failed.length} failed${skipNote}`;
+      counter.textContent = `✅ Done — ${state.completed} captured, ${state.failed.length} failed${skipNote}${trimNote}`;
       actions.innerHTML = '<button class="tx-bm-close">Close</button>';
     } else if (state.phase === "collecting") {
       counter.textContent = customMsg || `Phase 1 — collecting URLs: ${state.queue.length}`;
-    } else if (state.phase === "processing") {
+    } else if (state.phase === "processing" || state.phase === "retrying") {
+      const queue = state.phase === "retrying" ? state.retryQueue : state.queue;
+      const phaseLabel = state.phase === "retrying" ? "Retry pass" : "Phase 2";
       counter.textContent = customMsg ||
-        `Phase 2 — ${state.cursor}/${state.queue.length} (${state.completed} done, ${state.failed.length} failed${skipNote})`;
+        `${phaseLabel} — ${state.cursor}/${(queue || []).length} (${state.completed} done, ${state.failed.length} failed${skipNote}${trimNote}${etaSuffix})`;
     }
     const closeBtn = actions.querySelector(".tx-bm-close");
     if (closeBtn) {

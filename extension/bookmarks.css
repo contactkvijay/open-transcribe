@@ -15,9 +15,131 @@
 
 .tx-bm-trigger.tx-bm-trigger--deep {
   background: #794bc4;
-  margin-left: 6px;
+  margin-left: 0;
+  border-radius: 0 999px 999px 0;
+  padding: 8px 14px 8px 12px;
 }
 .tx-bm-trigger.tx-bm-trigger--deep:hover { background: #6a3ab1; }
+
+.tx-bm-deep-wrapper {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.tx-bm-deep-batch {
+  background: #2a1742;
+  color: #fff;
+  border: 1px solid #5b3791;
+  border-right: none;
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 999px 0 0 999px;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  outline: none;
+}
+.tx-bm-deep-batch:focus,
+.tx-bm-deep-batch:hover { background: #3a205c; }
+
+.tx-bm-count {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 12px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: #71767b;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  white-space: nowrap;
+}
+
+#tx-bm-deep-overlay .tx-bm-resume,
+#tx-bm-deep-overlay .tx-bm-discard {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border: none;
+  padding: 6px 14px;
+  font-size: 13px;
+  border-radius: 999px;
+  cursor: pointer;
+  margin-left: 8px;
+}
+#tx-bm-deep-overlay .tx-bm-resume {
+  background: #794bc4;
+}
+#tx-bm-deep-overlay .tx-bm-resume:hover { background: #6a3ab1; }
+#tx-bm-deep-overlay .tx-bm-discard:hover { background: rgba(255, 255, 255, 0.2); }
+
+.tx-bm-trigger.tx-bm-trigger--integrity {
+  background: #5d6970;
+  margin-left: 6px;
+}
+.tx-bm-trigger.tx-bm-trigger--integrity:hover { background: #4a5358; }
+
+.tx-bm-integrity-modal {
+  border: none;
+  border-radius: 14px;
+  padding: 0;
+  background: #15202b;
+  color: #f7f9f9;
+  width: min(640px, 92vw);
+  max-height: 80vh;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.tx-bm-integrity-modal::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+.tx-bm-integrity-inner {
+  padding: 18px 22px;
+  position: relative;
+  overflow: auto;
+  max-height: calc(80vh - 0px);
+}
+.tx-bm-integrity-close {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  background: transparent;
+  border: none;
+  color: #8899a6;
+  font-size: 22px;
+  line-height: 1;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.tx-bm-integrity-close:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+.tx-bm-integrity-inner h2 { margin: 0 0 8px 0; font-size: 18px; }
+.tx-bm-integrity-inner h3 { margin: 16px 0 4px 0; font-size: 14px; color: #c5cfd6; }
+.tx-bm-integrity-help { margin: 0 0 8px 0; color: #8899a6; font-size: 13px; }
+.tx-bm-integrity-inner ul {
+  margin: 4px 0 8px 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: #d5dde3;
+  max-height: 160px;
+  overflow: auto;
+  background: #0f1923;
+  border-radius: 6px;
+  padding: 8px 8px 8px 26px;
+}
+.tx-bm-integrity-inner button {
+  background: #1d9bf0;
+  color: #fff;
+  border: none;
+  padding: 7px 14px;
+  font-size: 13px;
+  border-radius: 999px;
+  cursor: pointer;
+  margin: 4px 0 12px 0;
+}
+.tx-bm-integrity-inner button:hover { background: #1a8cd8; }
+.tx-bm-integrity-inner button[disabled] { opacity: 0.6; cursor: wait; }
 
 #tx-bm-deep-overlay {
   position: fixed;
