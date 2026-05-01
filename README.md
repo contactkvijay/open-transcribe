@@ -6,6 +6,12 @@ Built as a personal-utility weekend project. Open-sourced under MIT — fork it,
 
 ## Demo
 
+https://github.com/contactkvijay/open-transcribe/raw/main/Demo.mp4
+
+<sub>(If your viewer doesn't render the video inline, [open it directly](./Demo.mp4).)</sub>
+
+## Architecture
+
 ```
 ┌──────────────────┐     ┌────────────────────┐     ┌──────────────────┐
 │  Chrome on x.com │ ──▶ │   ngrok HTTPS URL  │ ──▶ │ FastAPI on VPS   │
