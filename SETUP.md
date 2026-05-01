@@ -330,29 +330,21 @@ curl -s http://127.0.0.1:4040/api/tunnels \
 
 The extension folder must live on your local machine (not the VPS) because Chrome loads it from disk.
 
-### Option A — SCP (Windows PowerShell, Mac, Linux)
+### Option A — Clone the repo locally (simplest)
+
+```bash
+git clone https://github.com/contactkvijay/open-transcribe.git
+```
+
+The extension is in `open-transcribe/extension/`. Note the absolute path — you'll need it in Phase 11.
+
+### Option B — SCP from your VPS (Windows PowerShell, Mac, Linux)
+
+If you've already cloned the repo onto the VPS and want to copy the extension folder over:
 
 ```powershell
-scp -r vijay@<YOUR_VPS_IP>:/opt/transcribe/extension C:\AI\transcribe\transcribe-extension
+scp -r <USER>@<YOUR_VPS_IP>:/path/to/open-transcribe/extension C:\path\to\local\extension
 ```
-
-### Option B — Download a zip from the dev endpoint
-
-The backend exposes a one-shot dev endpoint that zips the extension folder:
-
-```
-https://<YOUR_NGROK_URL>/_dev/extension.zip
-```
-
-1. Open that URL in Chrome.
-2. ngrok shows an interstitial the first time per browser session — click **Visit Site**.
-3. The zip downloads. Extract it to `C:\AI\transcribe\transcribe-extension` (Windows):
-
-   ```cmd
-   cmd /c tar -xf %USERPROFILE%\Downloads\transcribe-extension.zip -C C:\AI\transcribe\transcribe-extension
-   ```
-
-   ⚠ Don't use the Windows right-click → Extract All; it nests the files inside an extra folder, and Chrome won't find `manifest.json`.
 
 ---
 
@@ -497,7 +489,7 @@ Track these for later — none are required to use the tool.
 1. **systemd auto-start** for backend + ngrok so the VPS reboot doesn't take the system down. A `transcribe-backend.service` + `transcribe-ngrok.service` pair, both `WantedBy=multi-user.target`.
 2. **Real domain + Caddy** to replace ngrok. Then the Backend URL becomes stable, the ngrok account is no longer needed, and you can publish the extension to Chrome Web Store. Migration is just changing the **Backend URL** in extension options + adding the new redirect URI to Google.
 3. **Per-user usage quota / rate limiting** — currently a single user could in theory transcribe enough video to exhaust your Groq free-tier quota.
-4. **Long-video chunking** — Groq has a ~25 MB upload limit, ~30 min of MP3 at 64 kbps. For videos longer than that, chunk audio with ffmpeg and concatenate transcripts.
+4. **Long-video chunking** — Groq has a ~25 MB upload limit, which fits about 50 minutes of MP3 at 64 kbps (the current default in `ytdl.py`). For videos longer than that, chunk audio with ffmpeg and concatenate transcripts.
 5. **Chrome Web Store publishing** — currently the extension is loaded "unpacked" for personal use. Publishing requires a $5 developer account, a Privacy Policy, and a different OAuth client type ("Chrome Extension").
 6. **Other platforms** — yt-dlp already supports YouTube, Instagram, TikTok, Reddit, etc. Adding them is just whitelisting more domains in `manifest.json`'s `host_permissions` and `content_scripts.matches`.
 7. **Audio chunked streaming** for instant feedback while transcription is in progress, instead of waiting for the full result.
@@ -508,7 +500,7 @@ Track these for later — none are required to use the tool.
 
 | File | Purpose |
 |---|---|
-| `backend/main.py` | FastAPI app entry, mounts routers, CORS, periodic audio cleanup, `/health`, `/_dev/extension.zip` |
+| `backend/main.py` | FastAPI app entry, mounts routers, CORS, periodic audio cleanup, `/health` |
 | `backend/config.py` | Loads `.env` via pydantic-settings |
 | `backend/db.py` | SQLAlchemy engine + session factory |
 | `backend/models.py` | `User`, `Transcript` ORM tables |
