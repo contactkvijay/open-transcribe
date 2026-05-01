@@ -41,6 +41,10 @@ def extract_audio(url: str) -> AudioResult:
         "no_warnings": True,
         "noprogress": True,
         "noplaylist": True,
+        # YouTube's "n parameter" challenge requires a JS runtime (deno)
+        # plus this remote-component script. Without it, only image
+        # formats are extractable for many YouTube videos.
+        "remote_components": ["ejs:github"],
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
