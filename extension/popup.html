@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>Transcribe</title>
+  </head>
+  <body>
+    <header>
+      <h1>Transcribe</h1>
+      <div id="status"></div>
+    </header>
+
+    <section id="signin-section" hidden>
+      <p class="muted">Sign in with Google to start using the extension.</p>
+      <button id="signin-btn" class="primary">Sign in with Google</button>
+      <a id="open-options" href="#">Open options</a>
+    </section>
+
+    <section id="signedin-section" hidden>
+      <div class="user-row">
+        <img id="avatar" alt="" />
+        <div>
+          <div id="username"></div>
+          <div id="email" class="muted"></div>
+        </div>
+        <button id="signout-btn" class="ghost">Sign out</button>
+      </div>
+      <h2>Recent</h2>
+      <ul id="history"></ul>
+      <a id="open-options-2" href="#" class="muted">Open options</a>
+    </section>
+
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>

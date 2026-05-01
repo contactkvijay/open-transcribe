@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Transcribe — Options</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+             max-width: 640px; margin: 40px auto; padding: 0 20px;
+             background: #15202b; color: #f7f9f9; }
+      h1 { font-size: 20px; }
+      label { display: block; margin: 16px 0 4px; font-weight: 600; }
+      input[type=text], input[type=url] {
+        width: 100%; padding: 8px 10px; border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.18);
+        background: #0f1923; color: #f7f9f9; font-size: 14px;
+      }
+      .hint { color: #8899a6; font-size: 12px; margin-top: 4px; }
+      button { margin-top: 16px; padding: 8px 16px; border: none;
+               border-radius: 999px; background: #1d9bf0; color: #fff;
+               font-size: 14px; cursor: pointer; }
+      button:hover { background: #1a8cd8; }
+      .ok { color: #00ba7c; margin-left: 8px; }
+      code { background: #0f1923; padding: 2px 6px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Transcribe — Options</h1>
+
+    <label for="backendUrl">Backend URL</label>
+    <input id="backendUrl" type="url" placeholder="https://abc123.ngrok-free.app" />
+    <div class="hint">The HTTPS URL of your VPS backend. ngrok URL while testing.</div>
+
+    <label for="googleClientId">Google OAuth Client ID</label>
+    <input id="googleClientId" type="text" placeholder="...apps.googleusercontent.com" />
+    <div class="hint">
+      OAuth client of type <strong>Web application</strong>. After loading the extension,
+      copy your extension ID from <code>chrome://extensions</code> and add
+      <code>https://&lt;EXT_ID&gt;.chromiumapp.org/</code> to the client's authorized redirect URIs.
+    </div>
+
+    <button id="save">Save</button>
+    <span id="status" class="ok"></span>
+
+    <script src="options.js"></script>
+  </body>
+</html>

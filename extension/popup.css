@@ -1,0 +1,103 @@
+:root {
+  color-scheme: dark;
+}
+body {
+  width: 360px;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #15202b;
+  color: #f7f9f9;
+  font-size: 14px;
+}
+header {
+  padding: 14px 16px 8px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 13px; color: #8899a6; margin: 12px 0 6px; }
+.muted { color: #8899a6; font-size: 12px; }
+section { padding: 10px 16px 16px; }
+.primary, .ghost {
+  background: #1d9bf0;
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.primary:hover { background: #1a8cd8; }
+.ghost {
+  background: transparent;
+  color: #8899a6;
+  border: 1px solid rgba(255,255,255,0.15);
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.ghost:hover { color: #fff; }
+.user-row {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+}
+#avatar { width: 40px; height: 40px; border-radius: 50%; background: #2c3a47; }
+#username { font-weight: 600; }
+ul { list-style: none; padding: 0; margin: 0; max-height: 320px; overflow-y: auto; }
+li {
+  padding: 8px 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+li:hover { background: rgba(255,255,255,0.03); }
+li .title { font-size: 13px; line-height: 1.3; }
+li .meta { font-size: 11px; color: #8899a6; }
+li .preview {
+  font-size: 12px;
+  color: #aab8c2;
+  margin-top: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+#status { font-size: 11px; color: #8899a6; }
+a { color: #1d9bf0; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Detail modal */
+.detail {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.7);
+  display: flex; align-items: stretch; justify-content: stretch;
+  z-index: 9999;
+}
+.detail-inner {
+  background: #15202b;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  gap: 8px;
+  overflow: hidden;
+}
+.detail textarea {
+  flex: 1;
+  min-height: 0;
+  background: #0f1923;
+  color: #e7e9ea;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: none;
+}
+.detail .row { display: flex; gap: 6px; flex-wrap: wrap; }

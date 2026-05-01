@@ -1,0 +1,99 @@
+.xtx-bar {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+  z-index: 9999;
+  pointer-events: auto;
+}
+
+.xtx-btn {
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  cursor: pointer;
+  line-height: 1;
+  backdrop-filter: blur(4px);
+  transition: background 120ms ease, transform 120ms ease;
+}
+.xtx-btn:hover { background: rgba(29, 155, 240, 0.85); }
+.xtx-btn:active { transform: scale(0.97); }
+.xtx-btn[disabled] { opacity: 0.7; cursor: wait; }
+
+.xtx-modal {
+  border: none;
+  border-radius: 14px;
+  padding: 0;
+  background: #15202b;
+  color: #f7f9f9;
+  width: min(680px, 92vw);
+  max-height: 80vh;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.xtx-modal::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+.xtx-modal-inner {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+}
+.xtx-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: transparent;
+  border: none;
+  color: #8899a6;
+  font-size: 22px;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.xtx-close:hover { color: #fff; background: rgba(255,255,255,0.08); }
+.xtx-modal-meta {
+  font-size: 13px;
+  color: #8899a6;
+}
+.xtx-transcript {
+  width: 100%;
+  min-height: 320px;
+  background: #0f1923;
+  color: #e7e9ea;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  resize: vertical;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.xtx-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.xtx-actions .xtx-btn {
+  background: #1d9bf0;
+  border: none;
+  font-size: 13px;
+  padding: 7px 14px;
+}
+.xtx-actions .xtx-btn:hover { background: #1a8cd8; }
+.xtx-error {
+  background: rgba(244, 33, 46, 0.12);
+  border: 1px solid rgba(244, 33, 46, 0.4);
+  color: #f4212e;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+}
