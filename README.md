@@ -29,7 +29,7 @@ Built as a personal-utility weekend project. Open-sourced under MIT — fork it,
 - **Self-host with your own keys.** No central service operated by anyone. You provide a Groq API key (free tier is plenty), you run the backend, your transcripts live in your SQLite.
 - **Multi-user.** Google sign-in lets you give access to family/team without sharing API keys.
 - **Cached.** Re-clicking on a previously transcribed video returns the saved transcript in ~25 ms — no re-download, no Groq call.
-- **Generic at heart.** yt-dlp supports 1000+ sites. Adding YouTube/Instagram/TikTok/etc. is just whitelisting domains in `extension/manifest.json`.
+- **Multi-platform.** Built-in: x.com / twitter.com and youtube.com (watch pages, Shorts, thumbnails). yt-dlp supports 1000+ sites — adding more is whitelisting domains in `extension/manifest.json` and writing a small per-platform adapter in `extension/content.js`.
 - **Tiny footprint.** Runs on a 1 vCPU / 1 GB RAM VPS. No GPU. Whisper happens in Groq's cloud.
 
 ## Quick start
@@ -115,18 +115,48 @@ All config is in `backend/.env` (copy from `.env.example`). Key vars:
 | `ALLOWED_ORIGINS` | CORS allowlist. `chrome-extension://*` lets any unpacked extension hit it. |
 | `YTDL_COOKIES_PATH` | Optional absolute path to a yt-dlp `cookies.txt`. Required for age-gated and members-only YouTube videos. |
 
-## YouTube auth-gated videos (optional)
+## YouTube setup (required for most videos)
 
-Public YouTube videos work out of the box. Age-gated and members-only videos need a `cookies.txt` exported from a logged-in browser.
+In practice YouTube needs **three** things stacked or transcription fails. The backend handles #3 automatically; you have to set up #1 and #2 once.
 
-1. On any machine where you're signed into YouTube, install a cookies-export browser extension (e.g. [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)).
-2. Visit `https://www.youtube.com`, click the extension, export `cookies.txt`.
-3. `scp cookies.txt your-vps:/opt/transcribe/backend/data/cookies.txt`
-4. On the VPS: `chmod 600 /opt/transcribe/backend/data/cookies.txt` (the file grants full Google account access — keep it locked down).
-5. In `backend/.env` add: `YTDL_COOKIES_PATH=/opt/transcribe/backend/data/cookies.txt`
-6. Restart the FastAPI service.
+### 1. Cookies (`cookies.txt`)
 
-Cookies expire after a few weeks; when transcription starts failing on auth-gated videos with "Sign in to confirm…", re-export and `scp` again. The file path stays the same.
+YouTube's anti-bot heuristics flag yt-dlp running on a VPS even on public videos, returning *"Sign in to confirm you're not a bot"*. Authenticated cookies bypass that. **Use a burner Google account** — a `cookies.txt` is a full session token.
+
+The export procedure has to be followed strictly or YouTube rotates the tokens and invalidates the file you just saved:
+
+1. Quit Chrome entirely first. No tab, anywhere, on YouTube.
+2. Open a **fresh Incognito window** and sign in to YouTube with the burner account.
+3. Open *one* YouTube tab, confirm a video plays. Don't navigate further.
+4. Install [**Get cookies.txt LOCALLY**](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) → click the extension → URL filter `youtube.com` → format **Netscape** → **Export**.
+5. **Within seconds**: close the *entire* Incognito window (not just the tab).
+6. SCP the file to the VPS:
+   ```bash
+   scp youtube.com_cookies.txt vijay@vps:/opt/transcribe/backend/data/cookies.txt
+   chmod 600 /opt/transcribe/backend/data/cookies.txt
+   ```
+7. In `backend/.env`:
+   ```
+   YTDL_COOKIES_PATH=/opt/transcribe/backend/data/cookies.txt
+   ```
+8. Restart FastAPI.
+
+Cookies expire in a few weeks; when transcription fails again with the bot message, repeat the export. File path doesn't change.
+
+### 2. Deno (JS runtime)
+
+YouTube uses an "n parameter" challenge that needs JS evaluation to decrypt the audio format URL. Without a JS runtime, yt-dlp can extract metadata but only thumbnail images — you'll see *"Requested format is not available"*.
+
+Install deno once:
+
+```bash
+curl -fsSL https://deno.land/install.sh | sudo DENO_INSTALL=/usr/local sh
+deno --version  # confirm it's on PATH
+```
+
+### 3. Challenge solver script (handled by the backend)
+
+`backend/ytdl.py` passes `remote_components=["ejs:github"]` to yt-dlp, which downloads the n-challenge solver from yt-dlp's GitHub on first use and caches it. No user action needed — listing it here so you know what the warning is about if you ever see it surface.
 
 ## Disclaimer
 

@@ -43,6 +43,7 @@ This guide reproduces everything that was set up. Follow it from top to bottom; 
 - Python 3.10+ (3.12 used here)
 - `ffmpeg`
 - `yt-dlp`
+- `deno` (JS runtime needed by yt-dlp to solve YouTube's n-parameter challenge — installed in Phase 7.6)
 - A user account with `sudo` access (for the apt installs)
 
 ### What you don't need
@@ -272,18 +273,25 @@ Paste it into the `.env` (replacing the placeholder).
 
 ---
 
-## Phase 7.5 — VPS: YouTube cookies (optional but usually needed)
+## Phase 7.5 — VPS: YouTube cookies (required for most YouTube videos)
 
-YouTube increasingly serves a "Sign in to confirm you're not a bot" challenge to yt-dlp running on a VPS. To get past it, yt-dlp needs an authenticated `cookies.txt` exported from a logged-in browser. Public YouTube videos may work without cookies; age-gated and members-only videos always require them.
+YouTube serves a "Sign in to confirm you're not a bot" challenge to yt-dlp running on a VPS — even on public videos. Authenticated cookies bypass it. **You will need this for ~all YouTube videos**, not just age-gated ones.
 
 > ⚠ **Use a burner Google account, not your main one.** A `cookies.txt` is a full session token — anyone holding the file can impersonate that account on any Google service.
 
+> ⚠ **The export procedure is non-obvious and easy to get wrong.** If you keep using YouTube in the same browser session even for a few seconds after clicking Export, YouTube rotates the tokens server-side and your exported file becomes a dead session. Steps 1, 2, and 5 below are the strict version that works.
+
 ### 7.5.1 Export cookies on your desktop
 
-1. Install the [**Get cookies.txt LOCALLY**](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) Chrome extension. (The older `Get cookies.txt` without "LOCALLY" was forked due to spyware in some versions — use this one.)
-2. Open a **new Incognito window** and sign into YouTube with the burner account. Confirm a video plays.
-3. Click the extension icon → set the URL filter to `youtube.com` → click **Export**. You'll get `youtube.com_cookies.txt` in your Downloads.
-4. **Close the Incognito window immediately.** If the same browser session keeps refreshing the auth tokens, YouTube may rotate them and invalidate your exported file.
+1. **Quit Chrome entirely first** — no tab anywhere should be on YouTube. (If even one tab is logged into YouTube and active, the rotation can affect the cookies you're about to export.)
+2. Open a **fresh Incognito window**.
+3. Sign in to YouTube with the **burner account**.
+4. Open *one* YouTube tab and confirm a video plays. Don't navigate further.
+5. Install the [**Get cookies.txt LOCALLY**](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) Chrome extension. (The older `Get cookies.txt` without "LOCALLY" was forked due to spyware in some versions — use this one.)
+6. Click the extension icon → URL filter set to `youtube.com` → format **Netscape** → click **Export**. You'll get `youtube.com_cookies.txt` in your Downloads.
+7. **Within seconds**: close the *entire* Incognito window (not just the tab). Use Ctrl+Shift+W or click the window's X.
+
+If transcription later fails with the bot message even after cookies are in place, the most likely cause is that step 7 wasn't fast enough or the same Chrome profile kept browsing YouTube — re-export.
 
 ### 7.5.2 Place the file on the VPS
 
@@ -310,6 +318,36 @@ Restart the backend (Phase 9). The next transcription attempt on YouTube uses th
 ### 7.5.4 When cookies expire
 
 YouTube auth cookies live a few weeks. When transcription starts failing on YouTube with `Sign in to confirm you're not a bot…` or similar, repeat 7.5.1–7.5.2 — the file path stays the same.
+
+### 7.5.5 Verify with yt-dlp directly
+
+Before declaring the cookies setup done, sanity-check from the VPS shell:
+
+```bash
+cd /opt/transcribe/backend
+./venv/bin/yt-dlp --cookies /opt/transcribe/backend/data/cookies.txt \
+  --simulate --print "OK title: %(title)s" \
+  "https://www.youtube.com/watch?v=<ANY_VIDEO_ID>"
+```
+
+If it prints the title cleanly: cookies work. If you see *"cookies are no longer valid"* or *"Sign in to confirm…"*: cookies were rotated, re-export. If you see *"Requested format is not available"* or *"n challenge solving failed"*: cookies are fine but you need Phase 7.6 (deno).
+
+---
+
+## Phase 7.6 — VPS: Install deno (required for YouTube)
+
+Even with valid cookies, YouTube uses an "n parameter" JavaScript challenge to obfuscate the audio format URL. yt-dlp needs a JavaScript runtime to evaluate that challenge. Without it, yt-dlp can extract metadata but only thumbnail images, and you'll see *"Requested format is not available"* when trying to actually download audio.
+
+yt-dlp's default JS runtime is `deno`. Install it system-wide:
+
+```bash
+curl -fsSL https://deno.land/install.sh | sudo DENO_INSTALL=/usr/local sh
+deno --version  # should print "deno X.Y.Z (...)"
+```
+
+The backend (`backend/ytdl.py`) already passes `remote_components=["ejs:github"]` in its yt-dlp options, which downloads the matching challenge-solver script from yt-dlp's GitHub on first use and caches it. No additional config required.
+
+> **Why not use the existing `node` if you have one?** yt-dlp only auto-detects `deno`. To use node you have to explicitly pass `--js-runtimes node:/usr/bin/node` per call. Installing deno is simpler and is what yt-dlp recommends.
 
 ---
 
@@ -536,6 +574,26 @@ If you ever rebuild the extension and skip this header, you'll see the issue aga
 **Fix**: follow Phase 7.5 — export a `cookies.txt` from a logged-in (burner) account in Incognito, drop it on the VPS at `/opt/transcribe/backend/data/cookies.txt`, set `YTDL_COOKIES_PATH=` in `.env`, restart the backend.
 
 When the cookies later expire (a few weeks), repeat the export — the file path stays the same.
+
+### Cookies were exported but yt-dlp still says they're invalid
+
+`yt-dlp` warning: *"The provided YouTube account cookies are no longer valid. They have likely been rotated in the browser as a security measure."*
+
+**Cause**: the browser session you exported from kept browsing YouTube even for a few seconds after the export. YouTube rotates auth tokens server-side when it detects activity, which retroactively invalidates the cookies in your saved file.
+
+**Fix**: re-export following Phase 7.5.1 strictly — Incognito window, *one* YouTube tab, click **Export**, then close the entire Incognito window within seconds. Don't refresh, don't open another video, don't switch tabs.
+
+### YouTube fails with "Requested format is not available" or "n challenge solving failed"
+
+**Cause**: cookies are fine, but no JavaScript runtime is installed on the VPS. YouTube uses an "n parameter" JS challenge to obfuscate the audio format URL; without a runtime, yt-dlp can only see image (thumbnail) formats and refuses to download audio.
+
+**Fix**: install `deno` per Phase 7.6, then restart the backend. Verify with the direct yt-dlp command at the end of Phase 7.5.5.
+
+### "Remote components challenge solver script (deno) and NPM package (deno) were skipped"
+
+**Cause**: deno is installed but yt-dlp wasn't told it's allowed to download the challenge-solver script.
+
+**Fix**: this is already handled by the backend (`backend/ytdl.py` passes `remote_components=["ejs:github"]`). If you see this when running `yt-dlp` directly from the shell for verification, add `--remote-components ejs:github` to the command line.
 
 ### "App is blocked: not allowed to sign in"
 
