@@ -3,7 +3,7 @@
   "name": "Transcribe + X Bookmarks Archive",
   "version": "0.5.0",
   "description": "Transcribe videos on x.com and youtube.com (MP3 or text via Groq Whisper). Export your X bookmarks to an Obsidian/Notion-ready folder of Markdown files with YAML frontmatter, thread continuations, top-20 comments, conversation parents, and a CSV index. Auto-syncs new bookmarks. Includes a command-center dashboard for stats, filtering, recapture, and bulk actions.",
-  "permissions": ["identity", "storage", "downloads", "activeTab"],
+  "permissions": ["identity", "storage", "downloads", "activeTab", "tabs"],
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
