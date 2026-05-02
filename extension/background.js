@@ -191,6 +191,42 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, id });
           return;
         }
+        case "openInTab": {
+          // Used by dashboard.html to spawn x.com tabs for re-capture /
+          // un-bookmark / re-bookmark / new deep export. Magic query
+          // params on the URL are picked up by bookmarks.js content
+          // script when the page loads.
+          const tab = await chrome.tabs.create({ url: msg.url, active: !!msg.active });
+          sendResponse({ ok: true, tabId: tab.id });
+          return;
+        }
+        case "openDashboard": {
+          const url = chrome.runtime.getURL("dashboard.html");
+          // Reuse an existing dashboard tab if one is already open so we
+          // don't accumulate duplicates each click.
+          const existing = await chrome.tabs.query({ url });
+          if (existing.length > 0) {
+            await chrome.tabs.update(existing[0].id, { active: true });
+            sendResponse({ ok: true, tabId: existing[0].id });
+          } else {
+            const tab = await chrome.tabs.create({ url });
+            sendResponse({ ok: true, tabId: tab.id });
+          }
+          return;
+        }
+        case "bookmarks-cancel-run": {
+          // Clear deep-export state across all x.com tabs by writing
+          // status=cancelled. The content script polls this and aborts.
+          const r = await chrome.storage.local.get("tx-bookmarks-deep-export");
+          const cur = r["tx-bookmarks-deep-export"];
+          if (cur) {
+            await chrome.storage.local.set({
+              "tx-bookmarks-deep-export": { ...cur, status: "cancelled", finishedAt: Date.now() },
+            });
+          }
+          sendResponse({ ok: true });
+          return;
+        }
         default:
           sendResponse({ ok: false, error: `Unknown message: ${msg.type}` });
       }

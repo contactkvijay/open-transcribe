@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Bookmarks Command Center</title>
+  <link rel="stylesheet" href="dashboard.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>📚 Bookmarks Command Center</h1>
+    <div class="folder-state">
+      <span id="folder-label" class="folder-label">No folder picked</span>
+      <button id="pick-folder" class="btn">📂 Change folder</button>
+      <button id="reload-data" class="btn">🔄 Reload</button>
+    </div>
+  </header>
+
+  <section class="stats" id="stats">
+    <!-- Stat cards rendered by dashboard.js -->
+  </section>
+
+  <section class="run-controls">
+    <div class="run-row">
+      <label class="run-label">Run new deep export
+        <select id="run-batch">
+          <option value="0" selected>all</option>
+          <option value="50">next 50</option>
+          <option value="100">next 100</option>
+          <option value="200">next 200</option>
+        </select>
+      </label>
+      <button id="run-export" class="btn btn-primary">🚀 Run</button>
+      <button id="run-resume-failed" class="btn">🔁 Resume failed</button>
+      <button id="run-resume-deferred" class="btn">📦 Resume deferred</button>
+      <button id="run-cancel" class="btn btn-danger" disabled>🛑 Cancel current</button>
+      <span id="run-status" class="run-status">idle</span>
+    </div>
+  </section>
+
+  <section class="table-controls">
+    <div class="filter-row">
+      <input id="search" type="text" placeholder="Search handle, text, tweet_id…" />
+      <span class="chip-group" id="status-chips"></span>
+      <span class="chip-group" id="trait-chips"></span>
+    </div>
+    <div class="bulk-row">
+      <span id="selected-count" class="muted">0 selected</span>
+      <button id="bulk-recapture" class="btn" disabled>📥 Re-capture selected</button>
+      <button id="bulk-unbookmark" class="btn" disabled>🔖 Un-bookmark selected</button>
+      <button id="bulk-delete-md" class="btn btn-danger" disabled>🗑 Delete .md selected</button>
+    </div>
+  </section>
+
+  <main>
+    <table id="rows" class="rows">
+      <thead>
+        <tr>
+          <th class="col-check"><input type="checkbox" id="select-all" /></th>
+          <th data-sort="phase2_status">Status</th>
+          <th data-sort="capture_complete">Complete</th>
+          <th data-sort="author_handle">Handle</th>
+          <th data-sort="text_preview">Preview</th>
+          <th data-sort="bookmarked_at">Bookmarked</th>
+          <th data-sort="posted_at">Posted</th>
+          <th data-sort="has_video">Vid</th>
+          <th data-sort="image_count">Img</th>
+          <th data-sort="is_article">Art</th>
+          <th data-sort="subpost_count">Subs</th>
+          <th data-sort="comment_count">Cmts</th>
+          <th data-sort="thread_count">Thd</th>
+          <th>Warnings</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="rows-body"></tbody>
+    </table>
+    <div id="empty-state" class="empty-state" style="display:none">
+      No matching rows. Adjust filters or run a new deep export above.
+    </div>
+  </main>
+
+  <aside class="side-panels">
+    <details>
+      <summary>📋 Failed URLs breakdown</summary>
+      <div id="failed-breakdown" class="failed-breakdown"></div>
+    </details>
+    <details>
+      <summary>🩺 Health log (last 50)</summary>
+      <pre id="health-log" class="health-log"></pre>
+    </details>
+    <details>
+      <summary>🔍 Folder integrity</summary>
+      <div id="integrity"></div>
+      <button id="run-integrity" class="btn">Run check</button>
+    </details>
+  </aside>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

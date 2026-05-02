@@ -108,6 +108,12 @@
 }
 .tx-bm-trigger.tx-bm-trigger--integrity:hover { background: #4a5358; }
 
+.tx-bm-trigger.tx-bm-trigger--dashboard {
+  background: #00ba7c;
+  margin-left: 6px;
+}
+.tx-bm-trigger.tx-bm-trigger--dashboard:hover { background: #009464; }
+
 .tx-bm-integrity-modal {
   border: none;
   border-radius: 14px;

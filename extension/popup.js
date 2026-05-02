@@ -24,15 +24,19 @@ async function refresh() {
   if (!auth.backendUrl) {
     $("status").textContent = "Set Backend URL in options";
     $("signin-section").hidden = false;
+    const anon = $("anon-dashboard-section"); if (anon) anon.hidden = false;
     return;
   }
   if (!auth.hasJwt) {
     $("signin-section").hidden = false;
     $("signedin-section").hidden = true;
+    const anon = $("anon-dashboard-section"); if (anon) anon.hidden = false;
     return;
   }
   $("signin-section").hidden = true;
   $("signedin-section").hidden = false;
+  // Hide anon dashboard prompt when signed-in section is showing the same button.
+  const anon = $("anon-dashboard-section"); if (anon) anon.hidden = true;
 
   const u = auth.user || {};
   if (u.picture) $("avatar").src = u.picture;
@@ -144,6 +148,15 @@ document.querySelectorAll("#open-options, #open-options-2").forEach(a => {
   a.addEventListener("click", (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
+  });
+});
+
+// Bookmarks dashboard — works regardless of sign-in state.
+document.querySelectorAll("#open-dashboard-btn, #open-dashboard-btn-anon").forEach((btn) => {
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    try { await send({ type: "openDashboard" }); window.close(); }
+    catch (e) { alert(e.message); }
   });
 });
 

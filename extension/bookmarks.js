@@ -1011,6 +1011,17 @@
     integrity.addEventListener("click", runIntegrityCheck);
     toolbar.appendChild(integrity);
 
+    // Command-center dashboard (chrome-extension:// page)
+    const dash = document.createElement("button");
+    dash.id = "tx-bm-dashboard-trigger";
+    dash.className = "tx-bm-trigger tx-bm-trigger--dashboard";
+    dash.textContent = "🗂 Dashboard";
+    dash.title = "Open the bookmarks command center: stats, table, per-row recapture / un-bookmark, bulk actions";
+    dash.addEventListener("click", () => {
+      chrome.runtime.sendMessage({ type: "openDashboard" }, () => {});
+    });
+    toolbar.appendChild(dash);
+
     // Count badge
     const badge = document.createElement("span");
     badge.id = "tx-bm-count";
@@ -2227,6 +2238,148 @@
     showToast(`📁 Auto-upgraded @${tweet.author.handle}/${tweet.id.slice(-6)}`);
   }
 
+  // ---------- Dashboard-driven actions (URL-triggered) ----------
+  //
+  // The command-center dashboard (dashboard.html) opens x.com tabs with
+  // magic query params to drive single-URL actions. This block recognises
+  // those params on page load, runs the action, and closes the tab when
+  // done. Every action is idempotent: running it twice has the same end
+  // state as running it once.
+
+  async function findBookmarkButton() {
+    // X uses two distinct testids depending on whether the tweet is
+    // currently bookmarked. Try both.
+    const removeBtn = document.querySelector('button[data-testid="removeBookmark"]');
+    if (removeBtn) return { el: removeBtn, currentlyBookmarked: true };
+    const addBtn = document.querySelector('button[data-testid="bookmark"]');
+    if (addBtn) return { el: addBtn, currentlyBookmarked: false };
+    return null;
+  }
+
+  // Wait up to maxMs for the bookmark button to render (X is virtualized).
+  async function waitForBookmarkButton(maxMs = 10000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      const found = await findBookmarkButton();
+      if (found) return found;
+      await sleep(300);
+    }
+    return null;
+  }
+
+  async function runDashboardActionRecapture() {
+    const article = await waitForArticleStable(15000);
+    if (!article) {
+      console.warn("[tx-action] recapture: article didn't render");
+      return;
+    }
+    // Coax X into rendering replies before extraction (mirrors deepProcessCurrent)
+    try {
+      for (let i = 0; i < 2; i++) {
+        window.scrollBy(0, window.innerHeight);
+        await sleep(1000);
+      }
+      window.scrollTo(0, 0);
+      await sleep(300);
+    } catch {}
+    const tweet = extractTweetWithThread(article);
+    if (!tweet) {
+      console.warn("[tx-action] recapture: extraction failed");
+      return;
+    }
+    const handle = await getSyncHandle();
+    if (!handle) {
+      console.warn("[tx-action] recapture: no sync folder set");
+      return;
+    }
+    try {
+      await writeBookmarkFile(handle, tweet);
+      await appendCsvRow(handle, tweet);
+      console.info("[tx-action] recapture: ok", tweet.id);
+      showToast(`📥 Recaptured @${tweet.author.handle}`);
+    } catch (e) {
+      console.error("[tx-action] recapture: write failed", e);
+    }
+  }
+
+  async function runDashboardActionUnbookmark() {
+    const found = await waitForBookmarkButton(12000);
+    if (!found) {
+      console.warn("[tx-action] unbookmark: button not found");
+      return;
+    }
+    if (!found.currentlyBookmarked) {
+      console.info("[tx-action] unbookmark: already not bookmarked, skip");
+      showToast("🔖 Already not bookmarked");
+      return;
+    }
+    found.el.click();
+    showToast("🔖 Un-bookmarked");
+    await sleep(800);
+  }
+
+  async function runDashboardActionRebookmark() {
+    const found = await waitForBookmarkButton(12000);
+    if (!found) {
+      console.warn("[tx-action] rebookmark: button not found");
+      return;
+    }
+    if (found.currentlyBookmarked) {
+      console.info("[tx-action] rebookmark: already bookmarked, skip");
+      showToast("🔁 Already bookmarked");
+      return;
+    }
+    found.el.click();
+    showToast("🔁 Re-bookmarked");
+    await sleep(800);
+  }
+
+  let dashboardActionRanForUrl = null;
+  async function maybeRunDashboardAction() {
+    if (location.href === dashboardActionRanForUrl) return;
+    const params = new URLSearchParams(location.search);
+    const action = params.get("txAction");
+    const run = params.get("txRun");
+
+    // Auto-trigger a deep export from /i/bookmarks?txRun=deep&txBatch=N
+    if (run === "deep" && location.pathname === "/i/bookmarks") {
+      dashboardActionRanForUrl = location.href;
+      const batchLimit = parseInt(params.get("txBatch") || "0", 10) || 0;
+      // Strip the magic params so a reload doesn't re-trigger.
+      const clean = location.pathname;
+      history.replaceState(null, "", clean);
+      // Small delay so the toolbar injects first.
+      await sleep(800);
+      try {
+        await startDeepExport({ batchLimit });
+      } catch (e) {
+        console.error("[tx-action] deep export auto-start failed", e);
+      }
+      return;
+    }
+
+    // Single-URL actions on a status page.
+    if (!action || !isStatusDetailPage()) return;
+    dashboardActionRanForUrl = location.href;
+    // Strip the magic param so a reload (or future visit) doesn't re-fire.
+    const clean = location.pathname;
+    history.replaceState(null, "", clean);
+
+    try {
+      if (action === "recapture") await runDashboardActionRecapture();
+      else if (action === "unbookmark") await runDashboardActionUnbookmark();
+      else if (action === "rebookmark") await runDashboardActionRebookmark();
+      else console.warn("[tx-action] unknown action", action);
+    } catch (e) {
+      console.error("[tx-action] failed", action, e);
+    }
+
+    // Auto-close the tab after a short delay so the user's tab list
+    // doesn't pile up after bulk actions.
+    await sleep(1500);
+    try { window.close(); } catch {}
+  }
+
   // ---------- Boot ----------
 
   // The header isn't always present at document_idle; SPA navigation also
@@ -2246,4 +2399,9 @@
   // If a deep export is in progress (or just finished) the script needs
   // to either resume the queue or show the summary panel.
   maybeResumeDeepExport().catch((e) => console.error("[Deep export] resume failed", e));
+
+  // Dashboard-driven URL triggers (recapture / unbookmark / rebookmark /
+  // auto-start deep export). Idempotent: re-running on the same URL is a
+  // no-op once the magic param is stripped.
+  maybeRunDashboardAction().catch((e) => console.error("[tx-action] failed", e));
 })();
