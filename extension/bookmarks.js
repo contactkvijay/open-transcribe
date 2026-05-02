@@ -669,6 +669,89 @@
   // deep export. Lets the user / future debugging see the raw timeline of
   // navigations: when, where, ok/fail, how long, what kind of failure.
   const HEALTH_HEADER = "timestamp,phase,url,status,duration_ms,kind";
+
+  // _phase1-urls.csv: full inventory of every URL Phase 1 collected from
+  // the bookmarks list, with its outcome in Phase 2. Written twice during
+  // a deep-export run -- once at end of Phase 1.5 (snapshot of what was
+  // found, before Phase 2 starts) and once at the end of Phase 2 (with
+  // final per-URL phase2_status). Lets the user diff Phase-1 count vs
+  // Phase-2 captured count to see exactly which URLs were lost where.
+  const PHASE1_CSV = "_phase1-urls.csv";
+  const PHASE1_HEADER = "tweet_id,permalink,phase1_at,phase2_status,phase2_kind,phase2_at";
+
+  function tweetIdFromUrl(url) {
+    const m = (url || "").match(/\/status\/(\d+)/);
+    return m ? m[1] : "";
+  }
+
+  // Build the phase1 CSV from the run's state. Statuses:
+  //  - skipped:   already had a "good" capture before this run started
+  //  - deferred:  trimmed out by the batch limit; will run next time
+  //  - captured:  Phase 2 wrote .md + CSV row successfully
+  //  - failed:    Phase 2 attempted but couldn't extract (kind explains why)
+  //  - pending:   Phase 2 didn't reach this URL (run still running, or cancelled)
+  async function writePhase1Csv(dirHandle, state) {
+    try {
+      const lines = [PHASE1_HEADER];
+      const allFound = state.allFoundUrls || [];
+      if (allFound.length === 0) return; // nothing to write yet
+      const alreadyGood = new Set(state.alreadyGoodUrls || []);
+      const deferred = new Set(state.deferredUrls || []);
+      const failedMap = new Map();
+      for (const f of (state.failed || [])) failedMap.set(f.url, f);
+
+      const phase1At = state.phase1FinishedAt
+        ? new Date(state.phase1FinishedAt).toISOString()
+        : "";
+      const finishedAt = state.finishedAt
+        ? new Date(state.finishedAt).toISOString()
+        : "";
+
+      // Compute which queue URLs were actually reached by Phase 2. The
+      // queue is the post-trim, post-skip list Phase B iterates; cursor
+      // is how far we got.
+      const queue = state.queue || [];
+      const cursor = Math.min(state.cursor || 0, queue.length);
+      const reached = new Set();
+      for (let i = 0; i < cursor; i++) reached.add(queue[i]);
+
+      for (const item of allFound) {
+        const url = item.url || "";
+        const tweetId = item.tweetId || tweetIdFromUrl(url);
+        let status = "pending";
+        let kind = "";
+        let at = "";
+        if (alreadyGood.has(url)) {
+          status = "skipped";
+          kind = "already-good";
+          at = phase1At;
+        } else if (deferred.has(url)) {
+          status = "deferred";
+          kind = "batch-limit";
+          at = phase1At;
+        } else if (failedMap.has(url)) {
+          const f = failedMap.get(url);
+          status = "failed";
+          kind = f.kind || "";
+          at = finishedAt;
+        } else if (reached.has(url)) {
+          status = "captured";
+          at = finishedAt;
+        }
+        lines.push(
+          [tweetId, url, phase1At, status, kind, at].map(csvEscape).join(",")
+        );
+      }
+
+      const fh = await dirHandle.getFileHandle(PHASE1_CSV, { create: true });
+      const w = await fh.createWritable();
+      await w.write(lines.join("\n") + "\n");
+      await w.close();
+    } catch (e) {
+      console.warn("[Bookmarks] failed to write phase1 csv", e);
+    }
+  }
+
   async function appendHealthRow(dirHandle, row) {
     try {
       let existing = "";
@@ -1452,8 +1535,18 @@
     // have full content for. "Truncated" entries stay -- they need re-capture.
     updateDeepPanel(state, `Phase 1.5 — scanning existing files (${state.queue.length} URLs)…`);
     const dirHandle = await getSyncHandle();
+
+    // Snapshot every URL Phase 1 found (before any filtering). We persist
+    // this so the _phase1-urls.csv inventory has a row for every discovered
+    // bookmark, even ones that get skipped or deferred below.
+    const allFoundUrls = state.queue.map((url) => ({
+      url,
+      tweetId: tweetIdFromUrl(url),
+    }));
+
     let alreadyGood = 0;
     let toReprocess = 0;
+    const alreadyGoodUrls = [];
     let filteredQueue = state.queue;
     if (dirHandle) {
       const captures = await detectExistingCaptures(dirHandle);
@@ -1462,8 +1555,10 @@
         const m = url.match(/\/status\/(\d+)/);
         const id = m && m[1];
         const q = id && captures.get(id);
-        if (q === "good") alreadyGood++;
-        else {
+        if (q === "good") {
+          alreadyGood++;
+          alreadyGoodUrls.push(url);
+        } else {
           if (q === "truncated") toReprocess++;
           filteredQueue.push(url);
         }
@@ -1475,10 +1570,16 @@
     const batchLimit = state.batchLimit || 0;
     let limitedQueue = filteredQueue;
     let batchTrimmed = 0;
+    const deferredUrls = [];
     if (batchLimit > 0 && filteredQueue.length > batchLimit) {
       limitedQueue = filteredQueue.slice(0, batchLimit);
+      for (let i = batchLimit; i < filteredQueue.length; i++) {
+        deferredUrls.push(filteredQueue[i]);
+      }
       batchTrimmed = filteredQueue.length - batchLimit;
     }
+
+    const phase1FinishedAt = Date.now();
 
     // Transition to Phase B
     const after = await patchDeepState({
@@ -1490,9 +1591,21 @@
       batchTrimmed,
       queue: limitedQueue,
       totalAtStart: limitedQueue.length,
+      allFoundUrls,
+      alreadyGoodUrls,
+      deferredUrls,
+      phase1FinishedAt,
     });
     if (!after || after.status !== "running") return;
     updateDeepPanel(after);
+
+    // Write Phase-1 inventory CSV right now (snapshot of what was found).
+    // The same file is rewritten at end of Phase 2 with final per-URL
+    // statuses. Even if the user cancels mid-Phase-2, the snapshot already
+    // shows skipped/deferred/pending so they can see where things stand.
+    if (dirHandle) {
+      await writePhase1Csv(dirHandle, after);
+    }
 
     if (after.queue.length === 0) {
       await deepFinish(after, "done");
@@ -1708,10 +1821,14 @@
   async function deepFinish(state, status) {
     const final = await patchDeepState({ status, finishedAt: Date.now() });
     const stateOut = final || { ...state, status, finishedAt: Date.now() };
-    // Best-effort summary file write
+    // Best-effort summary file write + phase1 inventory rewrite (with
+    // final per-URL statuses now that Phase 2 is done/cancelled).
     try {
       const handle = await getSyncHandle();
-      if (handle) await writeDeepExportSummary(handle, stateOut);
+      if (handle) {
+        await writeDeepExportSummary(handle, stateOut);
+        await writePhase1Csv(handle, stateOut);
+      }
     } catch (e) {
       console.warn("[Bookmarks] summary write skipped", e);
     }
