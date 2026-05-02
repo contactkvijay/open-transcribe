@@ -258,6 +258,93 @@
   // the top N as they appear in the rendered DOM (X's own ranking).
   const SUBPOST_LIMIT = 20;
 
+  // Per-bookmark quality flags. Computed on each capture so the user can
+  // tell at a glance whether a row is fully captured, partial, or had a
+  // detectable problem. Surfaced in:
+  //   * bookmarks.csv (capture_complete, capture_warnings columns)
+  //   * .md frontmatter (capture_complete, capture_warnings)
+  //   * _search.json (complete, warnings)
+  //
+  // Hard-fail flags (=> capture_complete: "false") indicate something
+  // important is missing that we *should* have captured. Partial flags
+  // (=> "partial") are by-design tradeoffs (e.g. video subtitles only)
+  // or known limits (the 20-comment cap). When neither is set the row
+  // is marked "true".
+  const QF_HARD = new Set(["text_empty", "images_partial", "parent_chain_missing"]);
+  const QF_PARTIAL = new Set(["replies_truncated", "video_subtitles_only", "quote_tweet_unresolved"]);
+
+  function computeQualityFlags(article, main, allArticles, mainIndex) {
+    const flags = [];
+    try {
+      // text_empty: a regular tweet (not an article) with nothing in the
+      // body. Articles are allowed to have empty `text` because their body
+      // is rendered separately in the markdown via extractArticleBody().
+      if (!main.isArticle && (!main.text || main.text.trim() === "")) {
+        flags.push("text_empty");
+      }
+
+      // images_partial: DOM has more media images than we extracted. Uses
+      // the same URL filter as extractTweet so the comparison is apples-
+      // to-apples. (Tweet-card thumbnails, profile pics, etc. are excluded
+      // both here and there.)
+      const domMediaImgs = Array.from(article.querySelectorAll("img"))
+        .map((img) => img.src)
+        .filter(isTweetMediaImage);
+      const uniqueDomImgs = new Set(domMediaImgs);
+      if (uniqueDomImgs.size > (main.images || []).length) {
+        flags.push("images_partial");
+      }
+
+      // replies_truncated: we hit the SUBPOST_LIMIT cap AND the DOM had
+      // more reply articles after the main one. Caller passes the article
+      // list and the main index so we can count without re-querying.
+      if ((main.subPosts || []).length >= SUBPOST_LIMIT && allArticles && mainIndex >= 0) {
+        let after = 0;
+        for (let i = mainIndex + 1; i < allArticles.length; i++) {
+          const a = allArticles[i];
+          if (a && !a.closest("aside")) after++;
+        }
+        if (after > SUBPOST_LIMIT) flags.push("replies_truncated");
+      }
+
+      // video_subtitles_only: by-design tradeoff. The bookmark .md links
+      // to the video on X but doesn't store the video file or transcribe
+      // it inline. Marking "partial" tells the dashboard to show a hint
+      // that the user can run transcription separately if they need text.
+      if (main.hasVideo) flags.push("video_subtitles_only");
+
+      // quote_tweet_unresolved: X's quote-tweet card uses an inner
+      // role="link" container with a UserAvatar inside. If the article
+      // has that structure but extractTweet failed to populate `quoted`,
+      // something prevented the quote extraction (renamed selector,
+      // protected tweet, etc.).
+      const inner = article.querySelector('div[role="link"][tabindex="0"]');
+      if (inner && inner !== article && inner.querySelector('[data-testid^="UserAvatar-Container"]') && !main.quoted) {
+        flags.push("quote_tweet_unresolved");
+      }
+
+      // parent_chain_missing: the article's text contains "Replying to @X"
+      // but we extracted no parent chain. Should not happen on a status
+      // detail page if X rendered the conversation.
+      if (isStatusDetailPage()) {
+        const text = article.innerText || "";
+        if (/Replying to @\w+/.test(text) && (!main.parentChain || main.parentChain.length === 0)) {
+          flags.push("parent_chain_missing");
+        }
+      }
+    } catch (e) {
+      console.warn("[Bookmarks] computeQualityFlags failed", e);
+    }
+    return flags;
+  }
+
+  function computeCaptureComplete(flags) {
+    if (!flags || flags.length === 0) return "true";
+    if (flags.some((f) => QF_HARD.has(f))) return "false";
+    if (flags.some((f) => QF_PARTIAL.has(f))) return "partial";
+    return "true";
+  }
+
   // On a status detail page, capture the surrounding conversation. Articles
   // BEFORE the bookmarked one in document order = conversation parents
   // (the chain that leads up to this bookmark). Articles AFTER = sub-posts.
@@ -272,7 +359,11 @@
     const main = extractTweet(article);
     if (!main) return null;
     main.parentChain = [];
-    if (!isStatusDetailPage()) return main;
+    if (!isStatusDetailPage()) {
+      main.qualityFlags = computeQualityFlags(article, main, null, -1);
+      main.captureComplete = computeCaptureComplete(main.qualityFlags);
+      return main;
+    }
 
     const mainEl = document.querySelector("main") || document.body;
     const all = Array.from(mainEl.querySelectorAll("article"));
@@ -298,6 +389,11 @@
         subCount++;
       }
     }
+
+    // Quality flags need the full article list + main index so they can
+    // detect e.g. truncated replies (we hit the cap with more in DOM).
+    main.qualityFlags = computeQualityFlags(article, main, all, mainIndex);
+    main.captureComplete = computeCaptureComplete(main.qualityFlags);
     return main;
   }
 
@@ -361,6 +457,10 @@
     lines.push(`thread_count: ${continuations}`);
     lines.push(`comment_count: ${replies}`);
     lines.push(`parent_count: ${(tweet.parentChain || []).length}`);
+    const qFlags = tweet.qualityFlags || [];
+    const qComplete = tweet.captureComplete || (qFlags.length === 0 ? "true" : computeCaptureComplete(qFlags));
+    lines.push(`capture_complete: ${yamlString(qComplete)}`);
+    lines.push(`capture_warnings: ${yamlList(qFlags)}`);
     lines.push(`tags: [bookmark${tweet.isArticle ? ", article" : ""}${tweet.hasVideo ? ", video" : ""}${continuations > 0 ? ", thread" : ""}]`);
     lines.push("---");
     return lines.join("\n");
@@ -492,13 +592,15 @@
   }
 
   const CSV_HEADER =
-    "tweet_id,author_name,author_handle,posted_at,bookmarked_at,permalink,has_video,image_count,is_article,has_thread,subpost_count,thread_count,comment_count,text_preview,md_filename";
+    "tweet_id,author_name,author_handle,posted_at,bookmarked_at,permalink,has_video,image_count,is_article,has_thread,subpost_count,thread_count,comment_count,text_preview,md_filename,capture_complete,capture_warnings";
 
   function tweetToCsvRow(tweet, exportedAt) {
     const preview = (tweet.text || "").replace(/\s+/g, " ").slice(0, 120);
     const subs = tweet.subPosts || [];
     const continuations = subs.filter((s) => s.isAuthor).length;
     const replies = subs.length - continuations;
+    const flags = tweet.qualityFlags || [];
+    const complete = tweet.captureComplete || (flags.length === 0 ? "true" : computeCaptureComplete(flags));
     return [
       tweet.id,
       tweet.author.name,
@@ -515,6 +617,8 @@
       replies,
       preview,
       bookmarkFilename(tweet),
+      complete,
+      flags.join(";"),
     ]
       .map(csvEscape)
       .join(",");
@@ -580,6 +684,8 @@
         has_video: tweet.hasVideo,
         image_count: (tweet.images || []).length,
         posted: tweet.timestamp,
+        capture_complete: tweet.captureComplete || (tweet.qualityFlags && tweet.qualityFlags.length === 0 ? "true" : computeCaptureComplete(tweet.qualityFlags || [])),
+        capture_warnings: tweet.qualityFlags || [],
       };
       if (idx >= 0) entries[idx] = entry;
       else entries.push(entry);
